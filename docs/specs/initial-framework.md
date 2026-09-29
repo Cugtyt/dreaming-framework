@@ -1,121 +1,224 @@
-# Initial callable dreaming framework
+# Callable dreaming framework
 
-## Start point
+## Start point and goal
 
-This is a new, independent TypeScript repository. The design starts from the
-published trace-scope and callable-dreaming proposals, but this specification
-is the implementation contract. No DSH package or scheduler is part of the
-library. The first consumer can supply its own trace adapter and business
-logic.
+This independent TypeScript library turns completed OpenTelemetry traces into
+reviewable Issue/Proposal/Predict improvement specs. The host supplies complete
+OTLP JSON `ExportTraceServiceRequest` data, chooses when to call dreaming, and
+owns implementation and measurement after a spec is returned. The framework
+does not schedule work or use DSH.
 
-## Goal
+## Public contract
 
-Expose a callable block that takes completed traces and an improvement goal,
-processes sessions in parallel, drafts a bounded improvement spec, and checks
-the candidate against trace evidence in a separate evaluation pass. A host
-chooses when to call it and what to do with the result.
+- `createDreamer({ model?, stages?, maxProposalAttempts? }).dream(otelTraces,
+  { workspaceDirectory, stages? })` accepts an array of completed OTLP JSON trace exports, one
+  trace ID per array element. The host supplies an AI SDK `LanguageModel` when
+  any default reasoning stage is used. If both reasoning stages are
+  supplied at setup, no model is required. The framework owns no model resource
+  or provider connection. `workspaceDirectory` is a caller-supplied empty run
+  directory, created if absent. A nonempty directory is rejected so stale files
+  cannot enter a new run. Per-call `stages` replace defaults for that call.
+  The examples create timestamped directories under repository `results/` and
+  write the final `result.json` there; this path choice is not part of the
+  library API.
+  There is no goal argument: evaluation items carry observed values and desired
+  targets, while item-level scope labels bound possible changes. All traces in
+  one call come from the same harness version; a returned spec proposes a change
+  for its next version.
+- All four named stages have defaults. `enrichTrace` returns no additions and
+  `projectSession` compacts content. The default `proposeSpec` and
+  `evaluateSpec` each create an AI SDK `ToolLoopAgent` with structured output,
+  framework-owned instructions, a run folder path, bounded read-only
+  `listFiles`, `searchFiles`, `readFile`, and `getSource` tools. The model prompt
+  contains the folder path rather than serialized session or stage data. Setup
+  and per-call stage replacements may replace any
+  default without changing the others. Each stage has a specific typed input
+  and output. The reasoning stages receive run services in a separate argument;
+  custom stages may use AI SDK, other models, or ordinary business logic.
+- Each default agent call writes `attempts/<number>/proposer-model.jsonl` or
+  `evaluator-model.jsonl` with its model inputs, prepared tool definitions,
+  model responses, tool results, token usage, and parsed result or error. The
+  files omit provider headers and credentials. They are local run artifacts,
+  separate from the input OTLP traces, and are not listed by the model's file
+  tools. Custom reasoning stages own any logging they need.
+- The framework parses OTLP before `enrichTrace`. That hook receives a parsed
+  `TraceDraft` and returns `TraceAdditions`: an optional missing harness version,
+  scope labels for unlabeled items, and independent evaluation records with
+  timestamps. The framework applies additions, assigns evaluation span IDs,
+  and validates the complete `TraceSession`. It rejects edits to existing
+  evidence. The original OTLP export stays unchanged. A complete trace needs
+  no custom enricher; parsing is not a replaceable stage.
+- `projectSession(trace)` receives only the validated trace.
+  `proposeSpec({ views, feedback }, services)` and
+  `evaluateSpec({ candidate, views, evaluations }, services)` receive their
+  own task data. `services` contains source lookup, run directory, and attempt
+  number for the reasoning stages.
+- Each span or event describing an independently attributable action or input
+  carries `harness_rsi.scope` (`in` or `out`). A mixed parent may omit scope
+  when a descendant is labeled. Parsed items keep scope only in `attributes`.
+  A scope label does not require a subject ID.
+- A score is a separate `gen_ai.evaluation.result` span or span event with
+  `gen_ai.evaluation.name`, `gen_ai.evaluation.score.value`,
+  `harness_rsi.evaluation.target`, and optional
+  `harness_rsi.evaluation.weight` (default `1`). Value and target are in
+  `[0, 1]`; the versioned metric name defines their meaning. The target
+  indicates the desired direction. The evaluation need not assess one action.
+  An evaluation span is an unscoped item with its own span ID. An evaluation
+  event is also an unscoped item, identified beneath its containing span. Parsed
+  evaluation items keep name, value, target, optional weight, and other
+  metadata together in `attributes`.
+- The default projector creates a trace-shaped context view that keeps the
+  harness version, order, IDs, kinds, scope, and evaluations. It replaces
+  tool result bodies with `[compacted]` while keeping message text and tool-call
+  arguments readable. Source lookup returns copies
+  of unprojected parsed items, including their full content. Projection may
+  change only these content fields; IDs, labels, scores, and other metadata
+  remain equal to the source.
+- The framework writes one `projections/<trace_id>.txt` file per projected
+  session. A trace tag carries the trace ID and harness version. Each item is
+  one line with its kind, scope, native span ID, optional event index, and
+  readable content. Evaluation tags carry score, target, and weight; meta tags
+  carry other attributes. XML escaping keeps source text from creating false
+  tags, and line breaks are encoded so one item stays on one line. The trace ID
+  and item IDs form the native reference for `getSource`. The file tools can
+  list, search, and read text and JSON files inside the run directory; reads
+  are paged and tool output is bounded.
+  Each `attempts/<number>/` contains that round's proposal, any evaluation,
+  and any feedback for revision. A default proposal with an invalid citation
+  is saved to `proposal.json`, its validation reason is saved to
+  `feedback.json`, and the evaluator is skipped for that round. A rejected or
+  revised evaluation also writes feedback in its own round. The next default
+  proposer reads the previous round's feedback. Custom proposal validation
+  continues to fail fast. Default stages inspect these files; custom stages
+  receive all projected views as typed input and their outputs are written
+  the same way.
+- Each proposal attempt calls one spec agent across all projected sessions. It
+  returns a cited Issue/Proposal/Predict candidate with `baseHarnessVersion`
+  equal to the input harness version, or `no_proposal`. The dedicated evaluator
+  examines all views, evaluation items, and original evidence. `accept` returns
+  a spec; `reject` or `revise` returns feedback directly to the proposer for
+  another attempt. A no-proposal result or the configurable attempt limit stops
+  the loop. The default limit is three attempts. Evaluator files are written
+  only when that agent runs.
+- Default proposal asks the model to identify score gaps, weights, already-met
+  targets to preserve, relevant `in` items, and contrary `out` context with
+  source citations, then return one bounded cited change or an explained
+  no-proposal result. Default spec evaluation asks whether that
+  change is likely to move named scores toward targets without degrading
+  preserved outcomes; rejection gives concrete feedback for the next attempt.
+  Stage outputs pass the same validation as custom outputs.
 
-## Scope
+## Code ownership
 
-- `createDreamer(stages, options).dream(traces, goal, stage_overrides?)` is the
-  public API. The five named stages are `mapTrace`, `projectSession`,
-  `analyzeSession`, `proposeSpec`, and `evaluateSpec`. A replacement applies
-  only to its call.
-- The framework supplies an identity mapping for already standardized traces
-  and a deterministic projector that replaces `tool.result` content with
-  `[compacted]`. The host supplies base implementations of the three reasoning
-  stages. They may use code, a model, or both.
-- Trace items retain stable source IDs, kinds, parents, subjects, and item-level
-  `in` or `out` scope. Evaluation events are separate records with a named
-  value, target, and optional weight. An omitted weight is `1` in the
-  evaluator's input. Unlabeled non-evaluation records are allowed only as
-  parents of scoped descendants.
-- A goal names the same improvement boundary as its traces. The proposal
-  identifies an `in` subject and contains Issue, Proposal, Predict, and source
-  references. A no-proposal result explains why no candidate is justified.
-- The evaluator receives the candidate, all session views and observations,
-  evaluation events, and a lookup for original source items. It returns
-  accept, revise with feedback, or reject. A revision triggers another
-  proposal pass, with at most three proposal attempts.
+- `src/index.ts` exports the public API, and `src/types.ts` owns its contracts.
+- `src/otel.ts` parses OTLP JSON. `src/validation.ts` holds shared trace and
+  stage invariants.
+- `src/stages/enrich-trace.ts`, `project-session.ts`, `propose-spec.ts`, and
+  `evaluate-spec.ts` each own that stage's default and output validation.
+  `source-tool.ts` and `model-trace.ts` are shared by the two model stages.
+- `src/dream.ts` composes stages, indexes source evidence, writes projections,
+  and controls proposal retries. It does not own stage prompts or
+  stage-specific output validation. `src/workspace.ts` owns run file writing;
+  `src/stages/file-tools.ts` owns confined read-only model file access.
 
-## Ownership and flow
+## OTLP JSON interpretation
+
+- A trace export uses the official `resourceSpans` → `scopeSpans` → `spans`
+  nesting, with hexadecimal `traceId` and `spanId`, optional `parentSpanId`,
+  span attributes, and timestamped span events. Extra OTLP fields are retained
+  in the host's input. The parser reads only the fields needed for dreaming.
+- The OTLP Resource carries `harness_rsi.harness.version` as a nonempty string.
+  The parser copies it to `TraceSession.harness_version`. One trace may include
+  multiple Resource groups, but any declared harness versions must agree. All
+  traces in one `dream()` call must share that version. The spec's
+  `baseHarnessVersion` identifies that source version; the host chooses the
+  next version identifier after implementation.
+- Each span becomes a context item with its OTLP span ID. Each span event keeps
+  its containing span ID and a zero-based `event_index` from that span's event
+  list. A source reference is `{ trace_id, span_id }` for a span or
+  `{ trace_id, span_id, event_index }` for an event, so repeated span IDs across
+  different traces remain distinct.
+  Span and event names provide kinds. Items are ordered by OTLP nanosecond
+  timestamps, breaking ties by source order. Item attributes remain in the
+  context item. A `gen_ai.tool.call.result` attribute supplies content.
+  Enrichment may add evaluation records to the parsed context view; timestamps
+  place them without reordering the OTLP input. The framework generates a
+  stable span ID for each added evaluation so it can be cited like a source span.
+- The input and enriched data remain immutable to later stages. Projection may
+  change only item content, message text, and tool-call arguments. The harness
+  version, IDs, ordering, other metadata, labels,
+  and scores remain
+  equal to their unprojected source items. A source reference must resolve.
+- Duplicate trace or span IDs, missing or mixed harness versions, malformed
+  labels or scores, missing scope on attributable leaves, proposals without an
+  in-scope source citation, and changed
+  projection identity fail clearly. No evaluation items yield `no_proposal`
+  because the trace supplies no improvement target.
+
+## Ownership and non-goals
 
 ```text
-host: select traces and goal; supply business stages
-  -> framework: map and validate each trace
-  -> framework: project and analyze each session in parallel
-  -> supplied proposer: candidate or no proposal
-  -> supplied evaluator: accept, revise, or reject in a fresh input context
-  -> framework: validated spec or explained no-proposal result
-host: review, implement, and measure any actual gain
+host: completed OTLP exports, empty run directory, AI SDK model when needed, optional stage replacements
+  -> framework: parse, apply returned enrichment, validate, project once per session
+  -> loop: one proposer explores all projections -> evaluate
+           rejection feedback returns to the proposer
+  -> framework: cited spec or explained no-proposal result
+host: review, implement, measure, adopt or reject the actual change
 ```
 
-The framework owns stage order, per-session parallel work, source lookup,
-validation, and the revision limit. Stage implementations own domain-specific
-compaction, observations, proposals, and judgments. The host owns scheduling,
-storage, model connections, implementation, and measured evaluation. The
-framework neither edits the harness nor claims that a predicted gain has
-already been measured.
-
-## Contracts
-
-- Inputs are JSON-compatible values. Stage inputs and source lookup results
-  are copies so a stage cannot mutate the host's trace or another stage's
-  evidence. Session results retain the supplied session order even when work
-  finishes in a different order.
-- Each trace has a unique `trace_id`, a `schema_version`, a `scope_boundary`,
-  and ordered records with unique `item_id` values. A source reference is
-  `<trace_id>/<item_id>`. Cross-trace duplicate references are invalid.
-- A projected view must keep every record in its original order with the same
-  ID, kind, parent, scope, subject, and evaluation. It may change `content`.
-  Original records remain retrievable by reference.
-- An independently attributable non-evaluation leaf requires scope. An `in`
-  record also requires an identifiable subject. A parent without scope must
-  have a scoped descendant. Evaluation values and targets are finite numbers
-  in `[0, 1]`; weight, when present, is finite and positive.
-- Observations, candidates, evaluation decisions, and no-proposal results
-  cite only resolvable source references. A candidate's `componentId` must
-  match the subject ID of at least one `in` record. Invalid input or stage
-  output throws a descriptive error; insufficient evidence returns a
-  no-proposal result.
-- A revision pass receives only the goal, completed session results, and the
-  evaluator's feedback. The evaluator gets fresh copies on each pass. If the
-  third proposal is not accepted, the call returns no proposal with the last
-  evaluation reason.
-
-## Non-goals for this first version
-
-- No built-in model provider, prompt, statistical estimator, or claim of
-  generic business reasoning. The host must supply the three reasoning stages.
-- No DSH adapter, OpenTelemetry parser, database, service, CLI, scheduled job,
-  implementation adapter, or post-implementation experiment runner.
-- No remote Git repository or package publication.
+The framework coordinates stages, uses AI SDK for default reasoning, and
+validates outputs. The host owns model access, label completion, score
+production, and any replacement reasoning stages. The framework does not
+provide a model provider, metric rubric, OTLP exporter, collector, scheduler,
+remote service, harness implementation adapter, or post-implementation
+experiment runner. It does not claim that a predicted gain has already been
+measured.
 
 ## Acceptance contract
 
-- A small fake harness can produce a cited Issue/Proposal/Predict spec through
-  the public API without importing DSH.
-- Sessions process concurrently, while returned views retain input order and
-  item order. The default projector compacts tool results without changing the
-  original trace or its source lookup.
-- Replacing one named stage affects one call and leaves the other stages in
-  place. The evaluator sees all selected views and can find contrary original
-  items beyond the candidate's citations.
-- Acceptance returns a spec; rejection, unsupported evidence, and exhausted
-  revisions return explained no-proposal results. Invalid scope, reference,
-  boundary, or projected identity fails clearly.
-- `pnpm test`, `pnpm typecheck`, and `git diff --check` pass on the new repo.
+- A runnable example uses a real-shaped OTLP JSON export with a Resource-level
+  harness version, labeled items, and a separate evaluation span. It supplies
+  an offline AI SDK mock model at setup and returns a cited spec with the input
+  version using both default reasoning stages without DSH.
+- Default stage model requests contain the run directory path and instructions,
+  without inline projected content. Read-only file and source lookup tools let
+  the model inspect relevant evidence. Rejection feedback is saved and reaches
+  a new default proposal call.
+  Malformed model outputs fail schema or framework output validation. Fully
+  custom reasoning stages work without a model; incomplete stages without a
+  model fail at setup. Invalid stage functions also fail at setup.
+- Enrichment can fill a missing harness version or label and return new
+  evaluations without altering existing evidence. A complete trace works with
+  empty enrichment. The framework owns OTLP traversal and generated IDs.
+- Projection compacts tool content while source lookup retains the full value;
+  each session has a dedicated projection file with native references, and
+  projected views keep input order. A nonempty run directory is rejected;
+  file tools cannot read outside it.
+- Rejection feedback reaches a fresh proposal pass. Acceptance returns
+  the accepted candidate; unsupported evidence and exhausted attempts return
+  explained no-proposal results.
+- Tests cover malformed input, missing labels and versions, mixed harness
+  versions, unresolved citations, candidates without an in-scope citation,
+  and changed projection identity.
+  Traces without a scope boundary work individually and together.
+  `pnpm check`, `pnpm test`, `pnpm typecheck`, `pnpm build`, the example,
+  its direct typecheck, a built-entry import, and `git diff --check` pass.
 
-## Implementation sequence
+## Implementation contract
 
-1. Write tests for a valid trace, default projection, source lookup, and one
-   accepted spec. Observe failure because the public module is absent. Add
-   the smallest types, validation, and pipeline to pass.
-2. Add tests for parallel sessions, stage replacement isolation, rejection,
-   revision, and the attempt limit. Implement only the control flow needed.
-3. Add tests for incomplete scope, out-of-scope component, unresolved source
-   reference, mismatched boundary, and altered projection identity. Complete
-   validation and run the full suite and typecheck.
-
-Only the public exports, implementation, tests, package setup, and README
-needed for those behaviors belong in this initial repository commit.
+1. Test OTLP parsing, enrichment, item-level scope, dedicated score items,
+   harness version consistency, projection identity, and native source references.
+   Implement parsing and validation in their existing owners.
+2. Test a caller-supplied empty run directory, one compact projection file per
+   trace, and rejection of stale files. Implement workspace writing and confined,
+   paged read-only file tools.
+3. Test one proposer call over all projected views, a cited candidate or
+   no-proposal result, dedicated evaluation, and feedback returning directly to
+   the next proposal attempt. Implement the loop without a per-session analysis
+   stage or analyses files.
+4. Test the default AI SDK proposer and evaluator with a mock model, including
+   projection and source tool calls, saved stage outputs, rejection feedback,
+   and output validation. Keep custom stage replacements and model-free setup
+   when both reasoning stages are supplied.
+5. Run tests, typecheck, style checks, build, the offline example, a multi-trace
+   file-flow sample, and `git diff --check` before reporting acceptance.

@@ -1,105 +1,123 @@
+import type { LanguageModel } from 'ai'
+
 export type Scope = 'in' | 'out'
 
 export interface TraceRecord {
-  item_id: string
+  span_id: string
+  event_index?: number
   parent_id?: string
   kind: string
   time?: string
-  subject?: { id: string; version?: string }
   content?: unknown
-  'harness_rsi.scope'?: Scope
-  'harness_rsi.evaluation'?: {
-    name: string
-    value: number
-    target: number
-    weight?: number
-  }
+  attributes?: Record<string, unknown>
 }
 
 export interface TraceSession {
   trace_id: string
-  schema_version: string
-  scope_boundary: string
+  harness_version: string
   records: TraceRecord[]
 }
 
-export interface Goal {
-  boundary: string
-  question: string
-  constraints?: string[]
+export interface TraceDraft {
+  trace_id: string
+  harness_version?: string
+  records: TraceRecord[]
+}
+
+export interface TraceAdditions {
+  harnessVersion?: string
+  scopes?: Array<{ reference: SourceReference; scope: Scope }>
+  evaluations?: Array<{
+    name: string
+    value: number
+    target: number
+    weight?: number
+    time: string
+  }>
 }
 
 export type SessionView = TraceSession
 
-export interface Observation {
-  text: string
-  references: string[]
-}
-
-export interface SessionResult {
-  view: SessionView
-  observations: Observation[]
+export interface SourceReference {
+  trace_id: string
+  span_id: string
+  event_index?: number
 }
 
 export interface ImprovementSpec {
   issue: string
   proposal: string
   predict: string
-  componentId: string
-  references: string[]
+  baseHarnessVersion: string
+  references: SourceReference[]
 }
 
 export interface NoProposal {
   kind: 'no_proposal'
   reason: string
-  references?: string[]
+  references?: SourceReference[]
 }
 
 export interface EvaluationDecision {
   kind: 'accept' | 'revise' | 'reject'
   reason: string
-  references?: string[]
+  references?: SourceReference[]
 }
 
 export type DreamResult =
   | { kind: 'spec'; spec: ImprovementSpec; evaluation: EvaluationDecision }
   | NoProposal
 
-export type SourceLookup = (reference: string) => TraceRecord | undefined
+export type SourceLookup = (reference: SourceReference) => TraceRecord | undefined
 export type MaybePromise<T> = T | Promise<T>
 
+export interface ReasoningServices {
+  getSource: SourceLookup
+  workspaceDirectory: string
+  attempt: number
+}
+
+export interface ProposalInput {
+  views: SessionView[]
+  feedback?: string
+}
+
+export interface SpecEvaluationInput {
+  candidate: ImprovementSpec
+  views: SessionView[]
+  evaluations: Array<{ reference: SourceReference; record: TraceRecord }>
+}
+
 export interface StageImplementations {
-  mapTrace: (input: unknown) => MaybePromise<TraceSession>
-  projectSession: (
-    trace: TraceSession,
-    context: { goal: Goal; getSource: SourceLookup },
-  ) => MaybePromise<SessionView>
-  analyzeSession: (
-    view: SessionView,
-    context: { goal: Goal; getSource: SourceLookup },
-  ) => MaybePromise<Observation[]>
-  proposeSpec: (input: {
-    goal: Goal
-    sessions: SessionResult[]
-    feedback?: string
-    getSource: SourceLookup
-  }) => MaybePromise<ImprovementSpec | NoProposal>
-  evaluateSpec: (input: {
-    goal: Goal
-    candidate: ImprovementSpec
-    sessions: SessionResult[]
-    evaluations: Array<{ reference: string; record: TraceRecord }>
-    getSource: SourceLookup
-  }) => MaybePromise<EvaluationDecision>
+  enrichTrace: (trace: Readonly<TraceDraft>) => MaybePromise<TraceAdditions>
+  projectSession: (trace: TraceSession) => MaybePromise<SessionView>
+  proposeSpec: (
+    input: ProposalInput,
+    services: ReasoningServices,
+  ) => MaybePromise<ImprovementSpec | NoProposal>
+  evaluateSpec: (
+    input: SpecEvaluationInput,
+    services: ReasoningServices,
+  ) => MaybePromise<EvaluationDecision>
 }
 
 export type StageOverrides = Partial<StageImplementations>
 
-export type BaseStages = Pick<
-  StageImplementations,
-  'analyzeSession' | 'proposeSpec' | 'evaluateSpec'
-> & Partial<Pick<StageImplementations, 'mapTrace' | 'projectSession'>>
-
-export interface DreamerOptions {
-  maxProposalAttempts?: number
+export interface DreamOptions {
+  workspaceDirectory: string
+  stages?: StageOverrides
 }
+
+type ReasoningImplementations = Pick<StageImplementations, 'proposeSpec' | 'evaluateSpec'>
+
+export type DreamerSetup =
+  | {
+      model: LanguageModel
+      stages?: StageOverrides
+      maxProposalAttempts?: number
+    }
+  | {
+      model?: never
+      stages: ReasoningImplementations & StageOverrides
+      maxProposalAttempts?: number
+    }
