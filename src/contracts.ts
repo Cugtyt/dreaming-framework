@@ -37,6 +37,8 @@ export const setupOptionsSchema = z.object({
   maxProposalAttempts: z.number().int().positive().optional(),
 })
 
+export type DreamInput = readonly unknown[] | string
+
 export type MaybePromise<T> = T | Promise<T>
 
 export type ReasoningServices = z.infer<typeof reasoningContextSchema> & { getSource: SourceLookup }

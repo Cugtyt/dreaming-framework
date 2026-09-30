@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -476,4 +476,100 @@ test('invalid per-run overrides fail before creating even an empty run workspace
     )
     assert.equal(existsSync(workspaceDirectory), false)
   }
+})
+
+test('folder input matches list results, preserves sources, and sorts projected sessions', async () => {
+  const inputDirectory = mkdtempSync(join(tmpdir(), 'dream-folder-'))
+  const first = `${JSON.stringify(otelTrace())}\n`
+  const second = `${JSON.stringify(otelTrace(secondId))}\n`
+  writeFileSync(join(inputDirectory, 'b.json'), second)
+  writeFileSync(join(inputDirectory, 'a.json'), first)
+  const dreamer = createDreamer({
+    stages: {
+      proposeSpec: ({ views }) => {
+        assert.deepEqual(
+          views.map((view) => view.trace_id),
+          [firstId, secondId],
+        )
+        return candidate
+      },
+      evaluateSpec: () => ({ kind: 'accept', reason: 'Supported across sessions' }),
+    },
+  })
+  const listWorkspace = mkdtempSync(join(tmpdir(), 'dream-list-output-'))
+  const folderWorkspace = mkdtempSync(join(tmpdir(), 'dream-folder-output-'))
+  const listResult = await dreamer.dream([otelTrace(), otelTrace(secondId)], {
+    workspaceDirectory: listWorkspace,
+  })
+  const folderResult = await dreamer.dream(inputDirectory, {
+    workspaceDirectory: folderWorkspace,
+  })
+  assert.deepEqual(folderResult, listResult)
+  for (const traceId of [firstId, secondId]) {
+    assert.equal(
+      readFileSync(join(folderWorkspace, 'projections', `${traceId}.txt`), 'utf8'),
+      readFileSync(join(listWorkspace, 'projections', `${traceId}.txt`), 'utf8'),
+    )
+  }
+  assert.equal(readFileSync(join(inputDirectory, 'a.json'), 'utf8'), first)
+  assert.equal(readFileSync(join(inputDirectory, 'b.json'), 'utf8'), second)
+})
+
+test('an empty trace folder returns the existing empty-list outcome', async () => {
+  const inputDirectory = mkdtempSync(join(tmpdir(), 'dream-empty-folder-'))
+  const dreamer = createDreamer({
+    stages: {
+      proposeSpec: () => {
+        throw new Error('No proposal should run')
+      },
+      evaluateSpec: () => {
+        throw new Error('No evaluator should run')
+      },
+    },
+  })
+  assert.deepEqual(
+    await dreamer.dream(inputDirectory, {
+      workspaceDirectory: mkdtempSync(join(tmpdir(), 'dream-output-')),
+    }),
+    { kind: 'no_proposal', reason: 'No completed traces were supplied' },
+  )
+})
+
+test('folder trace validation errors identify the source filename', async () => {
+  const inputDirectory = mkdtempSync(join(tmpdir(), 'dream-invalid-folder-'))
+  const dreamer = createDreamer({
+    stages: {
+      proposeSpec: () => candidate,
+      evaluateSpec: () => ({ kind: 'accept', reason: 'Supported' }),
+    },
+  })
+  const run = () =>
+    dreamer.dream(inputDirectory, {
+      workspaceDirectory: mkdtempSync(join(tmpdir(), 'dream-output-')),
+    })
+  writeFileSync(join(inputDirectory, 'invalid.json'), '{}')
+  await assert.rejects(run(), /invalid\.json.*OTLP/)
+  const missingVersion = otelTrace()
+  requireValue(missingVersion.resourceSpans[0]).resource.attributes.length = 0
+  writeFileSync(join(inputDirectory, 'invalid.json'), JSON.stringify(missingVersion))
+  await assert.rejects(run(), /invalid\.json.*harness version/)
+  writeFileSync(join(inputDirectory, 'invalid.json'), JSON.stringify(otelTrace()))
+  writeFileSync(join(inputDirectory, 'second.json'), JSON.stringify(otelTrace()))
+  await assert.rejects(run(), /second\.json.*duplicate trace_id/)
+  writeFileSync(join(inputDirectory, 'second.json'), JSON.stringify(otelTrace(secondId, 'other@1')))
+  await assert.rejects(run(), /second\.json.*different harness version/)
+})
+
+test('input loading failures do not create an output workspace', async () => {
+  const inputDirectory = mkdtempSync(join(tmpdir(), 'dream-broken-folder-'))
+  writeFileSync(join(inputDirectory, 'broken.json'), '{')
+  const workspaceDirectory = join(inputDirectory, 'output')
+  const dreamer = createDreamer({
+    stages: {
+      proposeSpec: () => candidate,
+      evaluateSpec: () => ({ kind: 'accept', reason: 'Supported' }),
+    },
+  })
+  await assert.rejects(dreamer.dream(inputDirectory, { workspaceDirectory }), /broken\.json/)
+  assert.equal(existsSync(workspaceDirectory), false)
 })

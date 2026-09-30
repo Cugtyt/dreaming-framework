@@ -36,6 +36,36 @@ to separate proposal and evaluation `ToolLoopAgent` instances, with structured
 outputs and read-only file tools plus `getSource` for compacted evidence. A host can
 replace any reasoning stage to use different business logic or another model.
 
+## Trace inputs
+
+`dream()` accepts an in-memory list of OTLP JSON exports or a trace folder path:
+
+```ts
+const dreamer = createDreamer({ model })
+
+await dreamer.dream([traceA, traceB], {
+  workspaceDirectory: '/path/to/list-run',
+})
+
+await dreamer.dream('/path/to/traces', {
+  workspaceDirectory: '/path/to/folder-run',
+})
+```
+
+Each list element or file contains one OTLP export with one trace ID. Folder
+loading reads immediate `.json` files in filename order; it ignores other files
+and subdirectories and rejects `.json` symlinks. Relative folder paths resolve
+against the current working directory. Invalid JSON, unreadable files, and trace
+validation errors identify the source filename. An empty folder returns the same
+`no_proposal` outcome as an empty list. The existing trace validation, enrichment,
+projection, proposal, and evaluation behavior applies to both forms.
+
+Source files are read only. Use a separate empty `workspaceDirectory` for outputs.
+Folder loading completes before that workspace is created. Codex session JSONL
+continues to use the adapter below; trace folders contain OTLP JSON, not session
+JSONL. `DreamInput` is the exported input type. See the
+[trace input contract](docs/specs/trace-input.md).
+
 ## Codex extension
 
 The optional Codex adapter converts a session JSONL file into OTLP traces:
@@ -270,7 +300,8 @@ adds `event_index` for an event within that span.
 `src/index.ts` exposes the public API. `src/contracts.ts` defines dreamer
 configuration, serializable input/option schemas, and stage interfaces; `src/domain/` owns trace/spec types, shared
 schemas, invariants, and source indexing without importing the AI SDK or agents.
-`src/trace/` owns supported OTLP schemas, parsing, and projection formatting. `src/dream.ts` composes stages,
+`src/trace/` owns input loading, supported OTLP schemas, parsing, and projection
+formatting. `src/dream.ts` composes stages,
 validates their results, and controls proposal retries; `src/workspace.ts`
 prepares the run directory and writes artifacts.
 

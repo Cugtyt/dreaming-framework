@@ -1,5 +1,6 @@
 export type {
   DreamerSetup,
+  DreamInput,
   DreamOptions,
   ProposalInput,
   ReasoningServices,

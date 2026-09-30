@@ -7,6 +7,7 @@ import {
 import {
   assertStageImplementations,
   type DreamerSetup,
+  type DreamInput,
   type DreamOptions,
   dreamOptionsSchema,
   type StageImplementations,
@@ -28,6 +29,7 @@ import { applyTraceAdditions, defaultEnrichTrace } from './stages/enrich-trace.t
 import { defaultEvaluateSpec } from './stages/evaluate-spec.ts'
 import { defaultProjectSession, validateView } from './stages/project-session.ts'
 import { defaultProposeSpec } from './stages/propose-spec.ts'
+import { loadTraceInputs } from './trace/input.ts'
 import { parseOtelTrace } from './trace/otel.ts'
 import { projectionText } from './trace/projection.ts'
 import { prepareWorkspace, writeWorkspaceJson, writeWorkspaceText } from './workspace.ts'
@@ -70,8 +72,7 @@ export function createDreamer(setup: DreamerSetup) {
   assertStageImplementations(defaults)
 
   return {
-    async dream(inputs: readonly unknown[], options: DreamOptions): Promise<DreamResult> {
-      if (!Array.isArray(inputs)) invalid('traces must be an array')
+    async dream(inputs: DreamInput, options: DreamOptions): Promise<DreamResult> {
       if (!object(options)) invalid('dream requires workspaceDirectory')
       if (!dreamOptionsSchema.safeParse(options).success)
         invalid('dream requires workspaceDirectory', 'shape')
@@ -79,28 +80,37 @@ export function createDreamer(setup: DreamerSetup) {
         invalid('run stages must be an object', 'shape')
       const stages = { ...defaults, ...options.stages }
       assertStageImplementations(stages)
+      const loadedInputs = await loadTraceInputs(inputs)
       const workspaceDirectory = await prepareWorkspace(options.workspaceDirectory)
-      if (inputs.length === 0)
+      if (loadedInputs.length === 0)
         return { kind: 'no_proposal', reason: 'No completed traces were supplied' }
       const traces = await Promise.all(
-        inputs.map(async (input) => {
-          const draft = parseOtelTrace(input)
-          const stageInput = structuredClone(draft)
-          const additions = await stages.enrichTrace(stageInput)
-          if (!isDeepStrictEqual(stageInput, draft))
-            invalid('enrichTrace changed existing trace data')
-          return validateTrace(applyTraceAdditions(draft, additions))
+        loadedInputs.map(async ({ input, sourcePath }) => {
+          try {
+            const draft = parseOtelTrace(input)
+            const stageInput = structuredClone(draft)
+            const additions = await stages.enrichTrace(stageInput)
+            if (!isDeepStrictEqual(stageInput, draft))
+              invalid('enrichTrace changed existing trace data')
+            return validateTrace(applyTraceAdditions(draft, additions))
+          } catch (error) {
+            if (sourcePath !== undefined && error instanceof ValidationError)
+              throw new ValidationError(`${sourcePath}: ${error.message}`, error.category)
+            throw error
+          }
         }),
       )
       const firstTrace = traces[0]
       if (firstTrace === undefined) invalid('No completed traces were parsed')
       const harnessVersion = firstTrace.harness_version
       const traceIds = new Set<string>()
-      for (const trace of traces) {
+      for (const [index, trace] of traces.entries()) {
+        const sourcePath = loadedInputs[index]?.sourcePath
+        const prefix = sourcePath === undefined ? '' : `${sourcePath}: `
         if (trace.harness_version !== harnessVersion) {
-          invalid(`trace ${trace.trace_id} has a different harness version`)
+          invalid(`${prefix}trace ${trace.trace_id} has a different harness version`)
         }
-        if (traceIds.has(trace.trace_id)) invalid(`duplicate trace_id ${trace.trace_id}`)
+        if (traceIds.has(trace.trace_id)) invalid(`${prefix}duplicate trace_id ${trace.trace_id}`)
         traceIds.add(trace.trace_id)
       }
       const { sources, inSources, evaluations, getSource } = createSourceIndex(traces)

@@ -4,15 +4,24 @@
 
 This independent TypeScript library turns completed OpenTelemetry traces into
 reviewable Issue/Proposal/Predict improvement specs. The host supplies complete
-OTLP JSON `ExportTraceServiceRequest` data, chooses when to call dreaming, and
-owns implementation and measurement after a spec is returned. The framework
+OTLP JSON `ExportTraceServiceRequest` data as a list or a trace folder, chooses
+when to call dreaming, and owns implementation and measurement after a spec is
+returned. The framework
 does not schedule work or use DSH.
 
 ## Public contract
 
-- `createDreamer({ model?, stages?, maxProposalAttempts?, contextWindowTokens? }).dream(otelTraces,
-  { workspaceDirectory, stages? })` accepts an array of completed OTLP JSON trace exports, one
-  trace ID per array element. The host supplies an AI SDK `LanguageModel` when
+- `createDreamer({ model?, stages?, maxProposalAttempts?, contextWindowTokens? }).dream(inputs,
+  { workspaceDirectory, stages? })` accepts `DreamInput`: an array of completed OTLP JSON
+  trace exports or a folder path. Each array element or immediate `.json` file contains
+  one export with one trace ID. Folder files are loaded in filename order; other
+  files and subdirectories are ignored, and matching symlinks are rejected.
+  Relative paths resolve against the current working directory. Invalid JSON,
+  unreadable files, and invalid traces report their source filename. An empty folder
+  behaves like an empty list. Source files remain unchanged; loading completes after
+  option/stage validation and before workspace creation. Use a separate output
+  workspace. Codex JSONL continues through its adapter. See [trace inputs](trace-input.md).
+  The host supplies an AI SDK `LanguageModel` when
   any default reasoning stage is used. If both reasoning stages are
   supplied at setup, no model is required. The framework owns no model resource
   or provider connection. `workspaceDirectory` is a caller-supplied empty run
@@ -132,8 +141,9 @@ does not schedule work or use DSH.
 - `src/domain/schemas.ts` owns shared structured-output schemas;
   `src/domain/validation.ts` owns trace/spec/decision invariants;
   `src/domain/sources.ts` owns native keys, indexing and cloned source lookup.
-- `src/trace/schemas.ts` owns supported OTLP wire schemas; `src/trace/otel.ts`
-  parses them and `src/trace/projection.ts` formats projected text.
+- `src/trace/input.ts` owns list/folder normalization and JSON file loading for
+  `dream()`. `src/trace/schemas.ts` owns supported OTLP wire schemas;
+  `src/trace/otel.ts` parses them and `src/trace/projection.ts` formats projected text.
 - `src/stages/` owns enrichment/projection behavior and proposal/evaluation instructions.
   `src/agent/run-agent.ts` owns construction and execution for both model stages,
   including tools, tracing, context hooks and the twelve-step limit.
@@ -229,7 +239,9 @@ measured.
   explained no-proposal results.
 - Tests cover malformed input, missing labels and versions, mixed harness
   versions, unresolved citations, candidates without an in-scope citation,
-  and changed projection identity.
+  and changed projection identity. Folder tests cover sorted immediate JSON files,
+  empty input, invalid paths and JSON, matching symlink rejection, filename-aware
+  trace failures, list/folder equivalence, and unchanged source bytes.
   Traces without a scope boundary work individually and together.
   `pnpm check`, `pnpm test`, `pnpm typecheck`, `pnpm build`, the example,
   its direct typecheck, a built-entry import, and `git diff --check` pass.

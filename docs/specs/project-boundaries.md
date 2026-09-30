@@ -16,7 +16,8 @@ changes belong to this work. Other worktrees are outside scope.
 - `domain/validation.ts` owns general assertions, trace and result invariants.
   `domain/sources.ts` owns native source keys, indexing, in-scope membership,
   evaluation collection and cloned lookup results.
-- `trace/otel.ts` converts OTLP; `trace/projection.ts` formats projected traces.
+- `trace/input.ts` owns list/folder input normalization and JSON loading for
+  `dream()`; `trace/otel.ts` converts OTLP; `trace/projection.ts` formats projected traces.
 - `dream.ts` composes and orchestrates the pipeline, independently validating
   default and caller-supplied stage results.
 - `stages/` owns enrichment/projection behavior and proposal/evaluation instructions.
