@@ -1,12 +1,42 @@
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 
-interface SessionLine {
-  position: number
-  timestamp: string
-  type: string
-  payload: Record<string, unknown>
-}
+import { z } from 'zod'
+
+const nonempty = z.string().refine((value) => value.trim() !== '', 'must be nonempty')
+const recordSchema = z.object({
+  timestamp: z.string(),
+  type: z.string(),
+  payload: z.custom<Record<string, unknown>>(
+    (value) => typeof value === 'object' && value !== null && !Array.isArray(value),
+  ),
+})
+const sessionLineSchema = recordSchema.extend({ position: z.number().int().nonnegative() })
+type SessionLine = z.infer<typeof sessionLineSchema>
+const metadataSchema = z.object({
+  id: nonempty.optional(),
+  session_id: nonempty.optional(),
+  cli_version: nonempty,
+})
+const startedSchema = z.object({ type: z.literal('task_started'), turn_id: nonempty })
+const messageSchema = z.object({
+  type: z.literal('message'),
+  role: z.enum(['user', 'assistant', 'developer', 'system']),
+  content: z.array(z.looseObject({ text: z.string().optional() })).optional(),
+  phase: z.string().optional(),
+})
+const callSchema = z.object({
+  type: z.enum(['function_call', 'custom_tool_call']),
+  call_id: nonempty,
+  name: nonempty,
+  input: z.unknown().optional(),
+  arguments: z.unknown().optional(),
+})
+const resultSchema = z.object({
+  type: z.enum(['function_call_output', 'custom_tool_call_output']),
+  call_id: nonempty,
+  output: z.unknown().optional(),
+})
 
 function object(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -49,15 +79,10 @@ function lines(jsonl: string): SessionLine[] {
     } catch {
       throw new Error(`Invalid Codex JSON at line ${position + 1}`)
     }
-    if (
-      !object(value) ||
-      typeof value.timestamp !== 'string' ||
-      typeof value.type !== 'string' ||
-      !object(value.payload)
-    ) {
-      throw new Error(`Invalid Codex record at line ${position + 1}`)
-    }
-    result.push({ position, timestamp: value.timestamp, type: value.type, payload: value.payload })
+    const parsed = recordSchema.safeParse(value)
+    if (!parsed.success)
+      throw new Error(`Invalid Codex record at line ${position + 1}: ${parsed.error.message}`)
+    result.push({ position, ...parsed.data })
   }
   return result
 }
@@ -69,11 +94,12 @@ function completedItems(records: SessionLine[]): Array<{ line: SessionLine; turn
   for (const line of records) {
     if (line.type === 'event_msg') {
       if (line.payload.type === 'task_started') {
-        const turn = line.payload.turn_id
-        if (typeof turn !== 'string' || turn.trim() === '') {
-          throw new Error(`Missing Codex turn identifier at line ${line.position + 1}`)
-        }
-        active = turn
+        const parsed = startedSchema.safeParse(line.payload)
+        if (!parsed.success)
+          throw new Error(
+            `Missing Codex turn identifier at line ${line.position + 1}: ${parsed.error.message}`,
+          )
+        active = parsed.data.turn_id
       } else if (line.payload.type === 'task_complete') {
         if (
           active !== undefined &&
@@ -109,10 +135,11 @@ export function convertSession(jsonl: string) {
   const records = lines(jsonl)
   const metadata = records.find((line) => line.type === 'session_meta')?.payload
   const sessionId = metadata?.session_id ?? metadata?.id
-  if (typeof sessionId !== 'string' || sessionId.trim() === '') {
+  if (!nonempty.safeParse(sessionId).success) {
     throw new Error('Codex session metadata has no session identifier')
   }
-  if (typeof metadata?.cli_version !== 'string' || metadata.cli_version.trim() === '') {
+  const parsedMetadata = metadataSchema.safeParse(metadata)
+  if (!parsedMetadata.success) {
     throw new Error('Codex session metadata has no CLI version')
   }
   const traceId = identifier(`codex:${sessionId}`, 32)
@@ -121,21 +148,27 @@ export function convertSession(jsonl: string) {
   const calls = new Map<string, string>()
   const results: Array<{ record: ReturnType<typeof span>; callKey: string }> = []
   for (const { line, turn } of completedItems(records)) {
-    const payload = line.payload
-    const isMessage =
-      payload.type === 'message' &&
-      ['user', 'assistant', 'developer', 'system'].includes(String(payload.role))
-    const isCall = payload.type === 'function_call' || payload.type === 'custom_tool_call'
+    const rawPayload = line.payload
+    const isMessage = rawPayload.type === 'message'
+    const isCall = rawPayload.type === 'function_call' || rawPayload.type === 'custom_tool_call'
     const isResult =
-      payload.type === 'function_call_output' || payload.type === 'custom_tool_call_output'
+      rawPayload.type === 'function_call_output' || rawPayload.type === 'custom_tool_call_output'
     if (!isMessage && !isCall && !isResult) continue
+    const parsedPayload = (
+      isMessage ? messageSchema : isCall ? callSchema : resultSchema
+    ).safeParse(rawPayload)
+    if (!parsedPayload.success)
+      throw new Error(
+        `Invalid Codex supported payload at line ${line.position + 1}: ${parsedPayload.error.message}`,
+      )
+    const payload = parsedPayload.data
     const milliseconds = Date.parse(line.timestamp)
     if (!Number.isFinite(milliseconds) || milliseconds < 0) {
       throw new Error(`Invalid Codex timestamp at line ${line.position + 1}`)
     }
     const time = (BigInt(milliseconds) * 1_000_000n + BigInt(line.position)).toString()
     const spanId = identifier(`${traceId}:${line.position}`, 16)
-    if (isMessage) {
+    if (payload.type === 'message') {
       const role = String(payload.role)
       spans.push(
         span(traceId, spanId, rootId, `gen_ai.${role}.message`, time, [
@@ -148,14 +181,8 @@ export function convertSession(jsonl: string) {
       )
       continue
     }
-    if (typeof payload.call_id !== 'string' || payload.call_id.trim() === '') {
-      throw new Error(`Missing Codex tool call identifier at line ${line.position + 1}`)
-    }
     const callKey = JSON.stringify([turn, payload.call_id])
-    if (isCall) {
-      if (typeof payload.name !== 'string' || payload.name.trim() === '') {
-        throw new Error(`Missing Codex tool name at line ${line.position + 1}`)
-      }
+    if (payload.type === 'function_call' || payload.type === 'custom_tool_call') {
       calls.set(callKey, spanId)
       spans.push(
         span(traceId, spanId, rootId, 'gen_ai.tool.call', time, [
@@ -164,7 +191,10 @@ export function convertSession(jsonl: string) {
           attribute('gen_ai.tool.call.arguments', serialized(payload.input ?? payload.arguments)),
         ]),
       )
-    } else {
+    } else if (
+      payload.type === 'function_call_output' ||
+      payload.type === 'custom_tool_call_output'
+    ) {
       const record = span(traceId, spanId, rootId, 'gen_ai.tool.call.result', time, [
         attribute('harness_rsi.scope', 'out'),
         attribute('gen_ai.tool.call.result', serialized(payload.output)),
@@ -187,7 +217,10 @@ export function convertSession(jsonl: string) {
         {
           resource: {
             attributes: [
-              attribute('harness_rsi.harness.version', `codex-cli@${metadata.cli_version}`),
+              attribute(
+                'harness_rsi.harness.version',
+                `codex-cli@${parsedMetadata.data.cli_version}`,
+              ),
             ],
           },
           scopeSpans: [

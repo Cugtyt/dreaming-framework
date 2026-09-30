@@ -3,10 +3,52 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { type Tool, tool } from 'ai'
 import { z } from 'zod'
 
-const MAX_FILES = 200
-const MAX_MATCHES = 100
-const MAX_LINES = 200
-const MAX_READ_CHARS = 20_000
+const offset = z.number().int().nonnegative().optional()
+export const listFilesInputSchema = z.object({
+  offset,
+  limit: z.number().int().min(1).max(200).optional(),
+})
+export const listFilesOutputSchema = z.object({
+  files: z.array(z.string()),
+  total: z.number().int().nonnegative(),
+  nextOffset: z.number().int().nonnegative().nullable(),
+})
+export const searchFilesInputSchema = z.object({
+  query: z.string().min(1),
+  regex: z.boolean().optional(),
+  path: z.string().min(1).optional(),
+  contextLines: z.number().int().min(0).max(5).optional(),
+  offset,
+  limit: z.number().int().min(1).max(100).optional(),
+})
+export const searchFilesOutputSchema = z.object({
+  matches: z.array(
+    z.object({
+      path: z.string(),
+      line: z.number().int().positive(),
+      text: z.string(),
+      context: z.array(z.object({ line: z.number().int().positive(), text: z.string() })),
+    }),
+  ),
+  total: z.number().int().nonnegative(),
+  nextOffset: z.number().int().nonnegative().nullable(),
+  truncated: z.boolean(),
+})
+export const readFileInputSchema = z.object({
+  path: z.string().min(1),
+  startLine: z.number().int().positive().optional(),
+  lineCount: z.number().int().min(1).max(200).optional(),
+  fullLines: z.boolean().optional(),
+})
+export const readFileOutputSchema = z.object({
+  path: z.string(),
+  startLine: z.number().int().positive(),
+  totalLines: z.number().int().nonnegative(),
+  content: z.string(),
+  truncated: z.boolean(),
+  truncatedLines: z.array(z.number().int().positive()),
+  nextLine: z.number().int().positive().nullable(),
+})
 
 function inside(root: string, path: string): boolean {
   const rel = relative(root, path)
@@ -26,7 +68,6 @@ async function files(root: string): Promise<string[]> {
   const found: string[] = []
   async function visit(directory: string): Promise<void> {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
-      if (found.length >= MAX_FILES) return
       if (entry.isSymbolicLink()) continue
       const path = join(directory, entry.name)
       if (entry.isDirectory()) await visit(path)
@@ -38,60 +79,119 @@ async function files(root: string): Promise<string[]> {
 }
 
 export function fileTools(workspaceDirectory: string): {
-  listFiles: Tool<Record<string, never>, { files: string[] }>
-  searchFiles: Tool<
-    { query: string },
-    { matches: Array<{ path: string; line: number; text: string }>; truncated: boolean }
-  >
-  readFile: Tool<
-    { path: string; startLine?: number | undefined; lineCount?: number | undefined },
-    { path: string; startLine: number; totalLines: number; content: string; truncated: boolean }
-  >
+  listFiles: Tool<z.infer<typeof listFilesInputSchema>, z.infer<typeof listFilesOutputSchema>>
+  searchFiles: Tool<z.infer<typeof searchFilesInputSchema>, z.infer<typeof searchFilesOutputSchema>>
+  readFile: Tool<z.infer<typeof readFileInputSchema>, z.infer<typeof readFileOutputSchema>>
 } {
   const root = resolve(workspaceDirectory)
+  const preview = (line: string): string => {
+    const characters = Array.from(line)
+    if (characters.length <= 200) return line
+    return `${characters.slice(0, 100).join('')} … [truncated: ${characters.length - 200} characters omitted] … ${characters.slice(-100).join('')}`
+  }
   return {
     listFiles: tool({
       description:
-        'List available text and JSON files in the run workspace. Paths are relative to the workspace.',
-      inputSchema: z.object({}),
-      execute: async () => ({ files: await files(root) }),
+        'List sorted text and JSON file paths in the workspace. Follow nextOffset until null to discover every file.',
+      inputSchema: listFilesInputSchema,
+      execute: async (input) => {
+        const { offset = 0, limit = 200 } = listFilesInputSchema.parse(input)
+        const all = await files(root)
+        return listFilesOutputSchema.parse({
+          files: all.slice(offset, offset + limit),
+          total: all.length,
+          nextOffset: offset + limit < all.length ? offset + limit : null,
+        })
+      },
     }),
     searchFiles: tool({
       description:
-        'Search workspace text and JSON files for a literal text fragment, returning file paths and line numbers.',
-      inputSchema: z.object({ query: z.string().min(1) }),
-      execute: async ({ query }) => {
-        const matches: Array<{ path: string; line: number; text: string }> = []
+        'Search all text and JSON files case-insensitively using literal text or a regular expression. Optional path selects an exact file or directory prefix. Results include line numbers and context; follow nextOffset until null.',
+      inputSchema: searchFilesInputSchema,
+      execute: async (input) => {
+        const {
+          query,
+          regex = false,
+          path: filter,
+          contextLines = 0,
+          offset = 0,
+          limit = 100,
+        } = searchFilesInputSchema.parse(input)
+        let pattern: RegExp | undefined
+        if (regex) {
+          try {
+            pattern = new RegExp(query, 'i')
+          } catch {
+            throw new Error('Invalid regular expression')
+          }
+        }
+        let prefix: string | undefined
+        if (filter !== undefined) {
+          const actual = await checkedFile(root, filter)
+          prefix = relative(await realpath(root), actual)
+        }
+        const matches: z.infer<typeof searchFilesOutputSchema>['matches'] = []
         for (const path of await files(root)) {
+          if (
+            prefix !== undefined &&
+            prefix !== '' &&
+            path !== prefix &&
+            !path.startsWith(`${prefix}${sep}`)
+          )
+            continue
           const lines = (await readFile(await checkedFile(root, path), 'utf8')).split('\n')
           for (const [index, line] of lines.entries()) {
-            if (line.toLowerCase().includes(query.toLowerCase())) {
-              matches.push({ path, line: index + 1, text: line.slice(0, 300) })
-              if (matches.length >= MAX_MATCHES) return { matches, truncated: true }
+            if (pattern ? pattern.test(line) : line.toLowerCase().includes(query.toLowerCase())) {
+              const start = Math.max(0, index - contextLines)
+              matches.push({
+                path,
+                line: index + 1,
+                text: preview(line),
+                context: lines
+                  .slice(start, index + contextLines + 1)
+                  .map((text, position) => ({ line: start + position + 1, text: preview(text) })),
+              })
             }
           }
         }
-        return { matches, truncated: false }
+        const nextOffset = offset + limit < matches.length ? offset + limit : null
+        return searchFilesOutputSchema.parse({
+          matches: matches.slice(offset, offset + limit),
+          total: matches.length,
+          nextOffset,
+          truncated: nextOffset !== null,
+        })
       },
     }),
     readFile: tool({
       description:
-        'Read up to 200 lines of a workspace text or JSON file by relative path. Use startLine to page.',
-      inputSchema: z.object({
-        path: z.string().min(1),
-        startLine: z.number().int().positive().optional(),
-        lineCount: z.number().int().min(1).max(MAX_LINES).optional(),
-      }),
-      execute: async ({ path, startLine = 1, lineCount = MAX_LINES }) => {
+        'Read up to 200 lines by relative path. Follow nextLine until null. Lines longer than 200 characters show their first and last 100 characters; use fullLines true to read their entire contents.',
+      inputSchema: readFileInputSchema,
+      execute: async (input) => {
+        const {
+          path,
+          startLine = 1,
+          lineCount = 200,
+          fullLines = false,
+        } = readFileInputSchema.parse(input)
         const lines = (await readFile(await checkedFile(root, path), 'utf8')).split('\n')
-        const selected = lines.slice(startLine - 1, startLine - 1 + lineCount).join('\n')
-        return {
+        const truncatedLines: number[] = []
+        const selected = lines
+          .slice(startLine - 1, startLine - 1 + lineCount)
+          .map((line, index) => {
+            const content = fullLines ? line : preview(line)
+            if (content !== line) truncatedLines.push(startLine + index)
+            return content
+          })
+        return readFileOutputSchema.parse({
           path,
           startLine,
           totalLines: lines.length,
-          content: selected.slice(0, MAX_READ_CHARS),
-          truncated: selected.length > MAX_READ_CHARS,
-        }
+          content: selected.join('\n'),
+          truncated: truncatedLines.length > 0,
+          truncatedLines,
+          nextLine: startLine - 1 + lineCount < lines.length ? startLine + lineCount : null,
+        })
       },
     }),
   }

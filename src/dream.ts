@@ -8,7 +8,9 @@ import {
   assertStageImplementations,
   type DreamerSetup,
   type DreamOptions,
+  dreamOptionsSchema,
   type StageImplementations,
+  setupOptionsSchema,
 } from './contracts.ts'
 import { createSourceIndex } from './domain/sources.ts'
 import type { DreamResult, SessionView } from './domain/types.ts'
@@ -16,6 +18,7 @@ import {
   invalid,
   isNoProposal,
   object,
+  ValidationError,
   validateCandidate,
   validateDecision,
   validateNoProposal,
@@ -33,6 +36,8 @@ const DEFAULT_ATTEMPTS = 3
 
 export function createDreamer(setup: DreamerSetup) {
   if (!object(setup)) invalid('createDreamer requires setup')
+  if (setup.stages !== undefined && !object(setup.stages))
+    invalid('setup stages must be an object', 'shape')
   const contextWindowTokens = setup.contextWindowTokens ?? DEFAULT_CONTEXT_WINDOW_TOKENS
   if (
     !Number.isSafeInteger(contextWindowTokens) ||
@@ -48,8 +53,8 @@ export function createDreamer(setup: DreamerSetup) {
     invalid('createDreamer requires a model or both reasoning stages')
   }
   const maxProposalAttempts = setup.maxProposalAttempts ?? DEFAULT_ATTEMPTS
-  if (!Number.isInteger(maxProposalAttempts) || maxProposalAttempts < 1) {
-    invalid('maxProposalAttempts must be a positive integer')
+  if (!setupOptionsSchema.safeParse({ maxProposalAttempts }).success) {
+    invalid('maxProposalAttempts must be a positive integer', 'shape')
   }
   const defaults: Partial<StageImplementations> = {
     enrichTrace: defaultEnrichTrace,
@@ -68,10 +73,15 @@ export function createDreamer(setup: DreamerSetup) {
     async dream(inputs: readonly unknown[], options: DreamOptions): Promise<DreamResult> {
       if (!Array.isArray(inputs)) invalid('traces must be an array')
       if (!object(options)) invalid('dream requires workspaceDirectory')
+      if (!dreamOptionsSchema.safeParse(options).success)
+        invalid('dream requires workspaceDirectory', 'shape')
+      if (options.stages !== undefined && !object(options.stages))
+        invalid('run stages must be an object', 'shape')
+      const stages = { ...defaults, ...options.stages }
+      assertStageImplementations(stages)
       const workspaceDirectory = await prepareWorkspace(options.workspaceDirectory)
       if (inputs.length === 0)
         return { kind: 'no_proposal', reason: 'No completed traces were supplied' }
-      const stages: StageImplementations = { ...defaults, ...options.stages }
       const traces = await Promise.all(
         inputs.map(async (input) => {
           const draft = parseOtelTrace(input)
@@ -130,15 +140,6 @@ export function createDreamer(setup: DreamerSetup) {
             attempt: attemptNumber,
           },
         )
-        if (isNoProposal(proposal)) {
-          validateNoProposal(proposal, sources)
-          await writeWorkspaceJson(
-            workspaceDirectory,
-            `attempts/${attemptNumber}/proposal.json`,
-            proposal,
-          )
-          return structuredClone(proposal)
-        }
         if (defaultProposer) {
           await writeWorkspaceJson(
             workspaceDirectory,
@@ -147,14 +148,13 @@ export function createDreamer(setup: DreamerSetup) {
           )
         }
         try {
-          validateCandidate(proposal, sources, inSources, harnessVersion)
+          if (isNoProposal(proposal)) validateNoProposal(proposal, sources)
+          else validateCandidate(proposal, sources, inSources, harnessVersion)
         } catch (error) {
           if (
             !defaultProposer ||
-            !(error instanceof Error) ||
-            !/^candidate (?:has unresolved reference|needs source references|needs an in-scope source reference|must contain source references)/.test(
-              error.message,
-            )
+            !(error instanceof ValidationError) ||
+            error.category !== 'reference'
           ) {
             throw error
           }
@@ -171,6 +171,7 @@ export function createDreamer(setup: DreamerSetup) {
             proposal,
           )
         }
+        if (isNoProposal(proposal)) return structuredClone(proposal)
         const candidate = structuredClone(proposal)
         const decision = await stages.evaluateSpec(
           {

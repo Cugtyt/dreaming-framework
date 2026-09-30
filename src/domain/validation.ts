@@ -1,3 +1,13 @@
+import { z } from 'zod'
+import {
+  evaluationAttributesSchema,
+  evaluationDecisionSchema,
+  improvementSpecSchema,
+  noProposalSchema as optionalNoProposalSchema,
+  scopeSchema,
+  sourceReferenceSchema,
+  traceSessionSchema,
+} from './schemas.ts'
 import { sourceKey } from './sources.ts'
 import type {
   EvaluationDecision,
@@ -8,16 +18,25 @@ import type {
   TraceSession,
 } from './types.ts'
 
-export function invalid(message: string): never {
-  throw new Error(message)
+export class ValidationError extends Error {
+  readonly category: 'shape' | 'invariant' | 'reference'
+
+  constructor(message: string, category: ValidationError['category'] = 'invariant') {
+    super(message)
+    this.name = 'ValidationError'
+    this.category = category
+  }
+}
+
+export function invalid(
+  message: string,
+  category: ValidationError['category'] = 'invariant',
+): never {
+  throw new ValidationError(message, category)
 }
 
 export function object(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-export function text(value: unknown, name: string): asserts value is string {
-  if (typeof value !== 'string' || value.trim() === '') invalid(`${name} must be a nonempty string`)
 }
 
 export function references(
@@ -25,54 +44,26 @@ export function references(
   name: string,
   sources: Map<string, TraceRecord>,
 ): asserts value is SourceReference[] {
-  if (
-    !Array.isArray(value) ||
-    !value.every(
-      (ref) =>
-        object(ref) &&
-        typeof ref.trace_id === 'string' &&
-        typeof ref.span_id === 'string' &&
-        (ref.event_index === undefined ||
-          (typeof ref.event_index === 'number' &&
-            Number.isInteger(ref.event_index) &&
-            ref.event_index >= 0)) &&
-        Object.keys(ref).every((key) => ['trace_id', 'span_id', 'event_index'].includes(key)),
-    )
-  ) {
-    invalid(`${name} must contain source references`)
+  if (!z.array(sourceReferenceSchema).safeParse(value).success) {
+    invalid(`${name} must contain source references`, 'reference')
   }
   for (const ref of value as SourceReference[]) {
     if (!sources.has(sourceKey(ref)))
-      invalid(`${name} has unresolved reference ${JSON.stringify(ref)}`)
-  }
-}
-
-function score(value: unknown, name: string): void {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1) {
-    invalid(`${name} must be a finite number between 0 and 1`)
+      invalid(`${name} has unresolved reference ${JSON.stringify(ref)}`, 'reference')
   }
 }
 
 export function validateTrace(value: unknown): TraceSession {
-  if (!object(value)) invalid('parsed trace must be an object')
-  text(value.trace_id, 'trace_id')
-  if (value.harness_version === undefined) invalid('trace is missing a harness version')
-  text(value.harness_version, 'harness_version')
-  if (!Array.isArray(value.records)) invalid(`trace ${value.trace_id} records must be an array`)
+  if (object(value) && value.harness_version === undefined)
+    invalid('trace is missing a harness version')
+  const parsed = traceSessionSchema.safeParse(value)
+  if (!parsed.success) invalid(`parsed trace: ${parsed.error.message}`, 'shape')
+  const trace = value as TraceSession
 
   const items = new Map<string, TraceRecord>()
-  for (const raw of value.records) {
-    if (!object(raw)) invalid(`trace ${value.trace_id} contains a non-object record`)
-    text(raw.span_id, 'span_id')
-    text(raw.kind, 'kind')
-    if (
-      raw.event_index !== undefined &&
-      (!Number.isInteger(raw.event_index) || (raw.event_index as number) < 0)
-    )
-      invalid(`item ${raw.span_id} has invalid event_index`)
+  for (const raw of trace.records) {
     const key = JSON.stringify([raw.span_id, raw.event_index ?? null])
-    if (items.has(key)) invalid(`trace ${value.trace_id} has duplicate source ${key}`)
-    if (raw.parent_id !== undefined) text(raw.parent_id, 'parent_id')
+    if (items.has(key)) invalid(`trace ${trace.trace_id} has duplicate source ${key}`)
     if (raw['harness_rsi.scope'] !== undefined)
       invalid(`item ${raw.span_id} cannot carry a separate scope label`)
     if (raw['harness_rsi.evaluation'] !== undefined)
@@ -82,24 +73,16 @@ export function validateTrace(value: unknown): TraceSession {
     if (raw.kind === 'gen_ai.evaluation.result') {
       if (attributes['harness_rsi.scope'] !== undefined)
         invalid(`evaluation ${raw.span_id} cannot have scope`)
-      text(attributes['gen_ai.evaluation.name'], `evaluation ${raw.span_id} name`)
-      score(attributes['gen_ai.evaluation.score.value'], `evaluation ${raw.span_id} value`)
-      score(attributes['harness_rsi.evaluation.target'], `evaluation ${raw.span_id} target`)
-      if (
-        attributes['harness_rsi.evaluation.weight'] !== undefined &&
-        (typeof attributes['harness_rsi.evaluation.weight'] !== 'number' ||
-          !Number.isFinite(attributes['harness_rsi.evaluation.weight']) ||
-          attributes['harness_rsi.evaluation.weight'] <= 0)
-      ) {
-        invalid(`evaluation ${raw.span_id} weight must be positive`)
-      }
-    } else {
-      const scope = attributes['harness_rsi.scope']
-      if (scope !== undefined && scope !== 'in' && scope !== 'out') {
-        invalid(`item ${raw.span_id} has invalid scope`)
-      }
+      const evaluation = evaluationAttributesSchema.safeParse(attributes)
+      if (!evaluation.success)
+        invalid(`evaluation ${raw.span_id}: ${evaluation.error.message}`, 'shape')
+    } else if (
+      attributes['harness_rsi.scope'] !== undefined &&
+      !scopeSchema.safeParse(attributes['harness_rsi.scope']).success
+    ) {
+      invalid(`item ${raw.span_id} has invalid scope`)
     }
-    items.set(key, raw as unknown as TraceRecord)
+    items.set(key, raw)
   }
 
   const children = new Map<string, TraceRecord[]>()
@@ -128,7 +111,7 @@ export function validateTrace(value: unknown): TraceSession {
       invalid(`item ${item.span_id} has missing scope without scoped children`)
     }
   }
-  return value as unknown as TraceSession
+  return trace
 }
 
 export function isNoProposal(value: unknown): value is NoProposal {
@@ -136,7 +119,8 @@ export function isNoProposal(value: unknown): value is NoProposal {
 }
 
 export function validateNoProposal(value: NoProposal, sources: Map<string, TraceRecord>): void {
-  text(value.reason, 'no-proposal reason')
+  const parsed = optionalNoProposalSchema.omit({ references: true }).safeParse(value)
+  if (!parsed.success) invalid(`no-proposal reason: ${parsed.error.message}`, 'shape')
   if (value.references !== undefined) references(value.references, 'no-proposal', sources)
 }
 
@@ -147,20 +131,18 @@ export function validateCandidate(
   harnessVersion: string,
 ): asserts value is ImprovementSpec {
   if (!object(value)) invalid('proposeSpec must return a candidate or no proposal')
-  text(value.issue, 'Issue')
-  text(value.proposal, 'Proposal')
-  text(value.predict, 'Predict')
-  text(value.baseHarnessVersion, 'base harness version')
+  const parsed = improvementSpecSchema.omit({ references: true }).safeParse(value)
+  if (!parsed.success) invalid(`candidate: ${parsed.error.message}`, 'shape')
   if (value.baseHarnessVersion !== harnessVersion)
     invalid('candidate has a different base harness version')
   references(value.references, 'candidate', sources)
-  if (value.references.length === 0) invalid('candidate needs source references')
+  if (value.references.length === 0) invalid('candidate needs source references', 'reference')
   if (
     !(value.references as SourceReference[]).some((reference) =>
       inSources.has(sourceKey(reference)),
     )
   ) {
-    invalid('candidate needs an in-scope source reference')
+    invalid('candidate needs an in-scope source reference', 'reference')
   }
 }
 
@@ -168,9 +150,13 @@ export function validateDecision(
   value: unknown,
   sources: Map<string, TraceRecord>,
 ): asserts value is EvaluationDecision {
-  if (!object(value) || !['accept', 'revise', 'reject'].includes(String(value.kind))) {
-    invalid('evaluateSpec must accept, revise, or reject')
-  }
-  text(value.reason, 'evaluation reason')
-  if (value.references !== undefined) references(value.references, 'evaluation decision', sources)
+  const parsed = evaluationDecisionSchema.omit({ references: true }).safeParse(value)
+  if (!parsed.success)
+    invalid(
+      `evaluateSpec must accept, revise, or reject with an evaluation reason: ${parsed.error.message}`,
+      'shape',
+    )
+  const decision = value as EvaluationDecision
+  if (decision.references !== undefined)
+    references(decision.references, 'evaluation decision', sources)
 }

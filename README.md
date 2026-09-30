@@ -139,6 +139,34 @@ the metric, and preservation of successful behavior. Actual improvement requires
 implementing a proposal and comparing harness versions on held-out tasks. See the
 [suite contract](docs/specs/codex-inspection-suite.md).
 
+The default agents are instructed to read every projection from beginning to end,
+one file at a time. `listFiles({ offset?, limit? })` returns sorted paths,
+`total`, and `nextOffset`; follow pages until `nextOffset` is null. Listing has
+no overall file cap. `searchFiles({ query, regex?, path?, contextLines?, offset?,
+limit? })` supports case-insensitive literal or JavaScript regex search, an exact
+file/directory-prefix filter, and surrounding line context. It returns `total`
+and `nextOffset` so every match is reachable. Listing pages contain at most 200
+files; search pages contain at most 100 matches.
+
+`readFile({ path, startLine?, lineCount?, fullLines? })` returns up to 200 lines,
+`nextLine`, and `truncatedLines`. Lines longer than 200 characters show the first
+100, an omitted-character marker, and the last 100. Reread those lines with
+`fullLines: true` to recover all content. There is no aggregate character cap;
+`getSource` also returns full original records. Paths remain confined to the run
+workspace. Search and source retrieval supplement the complete projection read.
+
+Domain data contracts are Zod schemas in `src/domain/schemas.ts`; public data types are inferred
+from them. OTLP schemas live in `src/trace/schemas.ts`; input/option schemas live
+in `src/contracts.ts`, and tool schemas live beside the tools. Semantic checks
+still enforce identity, scope, and resolved citations.
+Invalid stage overrides fail before a workspace is created. Default proposals,
+including `no_proposal`, retry categorized reference errors, while custom proposal validation fails
+immediately. Other malformed outputs and runtime errors fail immediately;
+evaluator revision/rejection retries within the configured proposal attempt limit.
+Conversation compaction remains enabled for default agents. See
+[the hardening contract](docs/specs/contract-hardening.md) for exact defaults and
+acceptance checks.
+
 ## Run artifacts and stages
 
 The hello-world example prints a fresh `results/<UTC timestamp>-<unique suffix>/`
@@ -186,6 +214,10 @@ stage error path without silently truncating evidence. There must be older work
 to summarize; if only the first recent round reaches the threshold, the stage
 fails rather than consuming the 10,000-token headroom. Each stage has independent
 context, and custom stages are unchanged.
+
+Full-line reads and original source retrieval remain unlimited. A retained tool
+result that exceeds the configured budget can fail the stage even after
+compaction; the framework does not silently discard evidence.
 Compaction adds model calls and cost but does not reset the existing 12-step
 limit or proposal attempts. File/search enumeration limits and the complete
 `getSource` response are unchanged, so a very large result can still prevent
@@ -236,9 +268,9 @@ adds `event_index` for an event within that span.
 ## Code layout
 
 `src/index.ts` exposes the public API. `src/contracts.ts` defines dreamer
-configuration and stage interfaces; `src/domain/` owns trace/spec types, shared
+configuration, serializable input/option schemas, and stage interfaces; `src/domain/` owns trace/spec types, shared
 schemas, invariants, and source indexing without importing the AI SDK or agents.
-`src/trace/` parses OTLP and formats projections. `src/dream.ts` composes stages,
+`src/trace/` owns supported OTLP schemas, parsing, and projection formatting. `src/dream.ts` composes stages,
 validates their results, and controls proposal retries; `src/workspace.ts`
 prepares the run directory and writes artifacts.
 
@@ -247,7 +279,7 @@ instructions. Both reasoning stages call `src/agent/run-agent.ts`, which owns
 agent construction, tools, context hooks, execution, and model logging.
 `src/agent/context-management.ts` handles budgets and history replacement;
 `src/agent/checkpoint.ts` defines the structured progress checkpoint.
-File/source tools live in `src/agent/tools/`. Codex conversion stays in
+File/source tools and their schemas live in `src/agent/tools/`. Codex conversion stays in
 `extensions/codex/` behind its separate package export.
 
 The dependency boundaries are checked in `tests/architecture.test.ts`.

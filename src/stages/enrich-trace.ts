@@ -1,32 +1,23 @@
 import { createHash } from 'node:crypto'
 import type { StageImplementations } from '../contracts.ts'
+import { traceAdditionsSchema } from '../domain/schemas.ts'
 import { sourceKey } from '../domain/sources.ts'
 import type { TraceDraft, TraceRecord } from '../domain/types.ts'
-import { invalid, object, text } from '../domain/validation.ts'
+import { invalid } from '../domain/validation.ts'
 
 export const defaultEnrichTrace: StageImplementations['enrichTrace'] = () => ({})
 
-function score(value: unknown, name: string): asserts value is number {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1) {
-    invalid(`${name} must be between 0 and 1`)
-  }
-}
-
 export function applyTraceAdditions(draft: TraceDraft, additions: unknown): TraceDraft {
-  if (
-    !object(additions) ||
-    Object.keys(additions).some((key) => !['harnessVersion', 'scopes', 'evaluations'].includes(key))
-  ) {
-    invalid('enrichTrace must return trace additions')
-  }
+  const parsed = traceAdditionsSchema.safeParse(additions)
+  if (!parsed.success)
+    invalid(`enrichTrace must return trace additions: ${parsed.error.message}`, 'shape')
+  const data = parsed.data
   const enriched = structuredClone(draft)
-  if (additions.harnessVersion !== undefined) {
-    text(additions.harnessVersion, 'harness version addition')
+  if (data.harnessVersion !== undefined) {
     if (enriched.harness_version !== undefined) invalid('enrichment cannot replace harness version')
-    enriched.harness_version = additions.harnessVersion
+    enriched.harness_version = data.harnessVersion
   }
-  if (additions.scopes !== undefined) {
-    if (!Array.isArray(additions.scopes)) invalid('scope additions must be an array')
+  if (data.scopes !== undefined) {
     const records = new Map(
       enriched.records.map((record) => [
         sourceKey({
@@ -37,50 +28,22 @@ export function applyTraceAdditions(draft: TraceDraft, additions: unknown): Trac
         record,
       ]),
     )
-    for (const entry of additions.scopes) {
-      if (!object(entry) || !object(entry.reference)) invalid('scope addition needs a reference')
+    for (const entry of data.scopes) {
       const reference = entry.reference
-      if (
-        reference.trace_id !== enriched.trace_id ||
-        typeof reference.span_id !== 'string' ||
-        (reference.event_index !== undefined &&
-          (!Number.isInteger(reference.event_index) || (reference.event_index as number) < 0))
-      ) {
+      if (reference.trace_id !== enriched.trace_id)
         invalid('scope addition has an invalid source reference')
-      }
-      const record = records.get(
-        sourceKey({
-          trace_id: enriched.trace_id,
-          span_id: reference.span_id,
-          event_index: reference.event_index as number | undefined,
-        }),
-      )
+      const record = records.get(sourceKey(reference))
       if (!record) invalid('scope addition has an unresolved source reference')
       if (record.kind === 'gen_ai.evaluation.result') invalid('evaluation cannot have scope')
       if (record.attributes?.['harness_rsi.scope'] !== undefined)
         invalid('enrichment cannot replace scope')
-      if (entry.scope !== 'in' && entry.scope !== 'out') invalid('scope must be in or out')
       record.attributes ??= {}
       record.attributes['harness_rsi.scope'] = entry.scope
     }
   }
-  if (additions.evaluations !== undefined) {
-    if (!Array.isArray(additions.evaluations)) invalid('evaluation additions must be an array')
+  if (data.evaluations !== undefined) {
     const spanIds = new Set(enriched.records.map((record) => record.span_id))
-    for (const [index, entry] of additions.evaluations.entries()) {
-      if (!object(entry)) invalid('evaluation addition must be an object')
-      text(entry.name, 'evaluation name')
-      score(entry.value, 'evaluation value')
-      score(entry.target, 'evaluation target')
-      if (
-        entry.weight !== undefined &&
-        (typeof entry.weight !== 'number' || !Number.isFinite(entry.weight) || entry.weight <= 0)
-      ) {
-        invalid('evaluation weight must be positive')
-      }
-      if (typeof entry.time !== 'string' || !/^\d+$/.test(entry.time)) {
-        invalid('evaluation time must be an OTLP nanosecond timestamp')
-      }
+    for (const [index, entry] of data.evaluations.entries()) {
       let collision = 0
       let spanId: string
       do {

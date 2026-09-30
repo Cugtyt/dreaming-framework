@@ -3,7 +3,13 @@ import { existsSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } fro
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { fileTools } from '../src/agent/tools/file-tools.ts'
+import {
+  fileTools,
+  listFilesOutputSchema,
+  readFileOutputSchema,
+  searchFilesOutputSchema,
+} from '../src/agent/tools/file-tools.ts'
+import { sourceTool } from '../src/agent/tools/source-tool.ts'
 import { createDreamer } from '../src/index.ts'
 import { projectionText } from '../src/trace/projection.ts'
 import { requireValue } from './helpers.ts'
@@ -123,7 +129,7 @@ test('read-only file tools confine paths to the run workspace', async () => {
   const listFiles = requireValue(tools.listFiles.execute)
   const toolOptions = { toolCallId: 'test', messages: [], context: undefined }
   const listed = await listFiles({}, toolOptions)
-  assert.deepEqual(listed, { files: ['inside.json', 'inside.txt'] })
+  assert.deepEqual(listed, { files: ['inside.json', 'inside.txt'], total: 2, nextOffset: null })
   const content = await read({ path: 'inside.json' }, toolOptions)
   assert.match(JSON.stringify(content), /answer/)
   assert.match(JSON.stringify(await read({ path: 'inside.txt' }, toolOptions)), /readable/)
@@ -158,5 +164,89 @@ test('search finds evaluation scores beyond the first read page', async () => {
   assert.deepEqual(
     result.matches.map((match) => ({ path: match.path, line: match.line })),
     [{ path: 'projection.json', line: 242 }],
+  )
+})
+
+test('listing and searching reach every file through stable pages', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'dream-pages-'))
+  for (let index = 0; index < 201; index++) {
+    writeFileSync(
+      join(directory, `${String(index).padStart(3, '0')}.txt`),
+      'before\nneedle 42\nafter',
+    )
+  }
+  const tools = fileTools(directory)
+  const toolOptions = { toolCallId: 'test', messages: [], context: undefined }
+  const listFiles = requireValue(tools.listFiles.execute)
+  const searchFiles = requireValue(tools.searchFiles.execute)
+  const first = listFilesOutputSchema.parse(await listFiles({}, toolOptions))
+  assert.equal(first.total, 201)
+  assert.equal(first.files.length, 200)
+  assert.equal(first.nextOffset, 200)
+  const last = await listFiles({ offset: 200 }, toolOptions)
+  assert.deepEqual(last, { files: ['200.txt'], total: 201, nextOffset: null })
+  const matches = searchFilesOutputSchema.parse(
+    await searchFiles({ query: 'needle', offset: 200 }, toolOptions),
+  )
+  assert.equal(matches.total, 201)
+  assert.equal(matches.nextOffset, null)
+  assert.equal(matches.matches[0]?.path, '200.txt')
+  const filtered = searchFilesOutputSchema.parse(
+    await searchFiles(
+      { query: 'needle \\d+', regex: true, path: '200.txt', contextLines: 1 },
+      toolOptions,
+    ),
+  )
+  assert.equal(filtered.total, 1)
+  assert.deepEqual(filtered.matches[0]?.context, [
+    { line: 1, text: 'before' },
+    { line: 2, text: 'needle 42' },
+    { line: 3, text: 'after' },
+  ])
+  await assert.rejects(
+    async () => searchFiles({ query: '[', regex: true }, toolOptions),
+    /regular expression/,
+  )
+  await assert.rejects(
+    async () => searchFiles({ query: 'x', path: '../outside' }, toolOptions),
+    /escapes/,
+  )
+})
+
+test('long line previews preserve both ends and full reads preserve every character', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'dream-long-line-'))
+  const long = 'A'.repeat(100) + 'x'.repeat(35_000) + 'Z'.repeat(100)
+  writeFileSync(join(directory, 'trace.txt'), `${long}\nlast`)
+  const tools = fileTools(directory)
+  const readFile = requireValue(tools.readFile.execute)
+  const toolOptions = { toolCallId: 'test', messages: [], context: undefined }
+  const preview = readFileOutputSchema.parse(
+    await readFile({ path: 'trace.txt', lineCount: 1 }, toolOptions),
+  )
+  assert.equal(
+    preview.content,
+    `${'A'.repeat(100)} … [truncated: 35000 characters omitted] … ${'Z'.repeat(100)}`,
+  )
+  assert.deepEqual(preview.truncatedLines, [1])
+  assert.equal(preview.nextLine, 2)
+  const full = readFileOutputSchema.parse(
+    await readFile({ path: 'trace.txt', fullLines: true }, toolOptions),
+  )
+  assert.equal(full.content, `${long}\nlast`)
+  assert.deepEqual(full.truncatedLines, [])
+  assert.equal(full.nextLine, null)
+})
+
+test('source retrieval preserves large original contents', async () => {
+  const content = 'original'.repeat(10_000)
+  const reference = { trace_id: traceId, span_id: spanId }
+  const original = { span_id: spanId, kind: 'tool.result', content, attributes: {} }
+  const source = sourceTool((ref) => (ref.span_id === spanId ? original : undefined))
+  const getSource = requireValue(source.execute)
+  const toolOptions = { toolCallId: 'test', messages: [], context: undefined }
+  assert.deepEqual(await getSource({ reference }, toolOptions), original)
+  assert.equal(
+    await getSource({ reference: { ...reference, span_id: 'missing' } }, toolOptions),
+    null,
   )
 })

@@ -97,10 +97,12 @@ does not schedule work or use DSH.
   tags, and line breaks are encoded so one item stays on one line. The trace ID
   and item IDs form the native reference for `getSource`. The file tools can
   list, search, and read text and JSON files inside the run directory; reads
-  are paged and tool output is bounded.
+  are paged with explicit continuation. Listing/search have no overall cap;
+  long lines use recoverable head/tail previews. Full-line reads and getSource
+  preserve complete content. See [contract hardening](contract-hardening.md).
   Each `attempts/<number>/` contains that round's proposal, any evaluation,
   and any feedback for revision. A default proposal with an invalid citation
-  is saved to `proposal.json`, its validation reason is saved to
+  is identified by a reference error category and saved to `proposal.json`; its validation reason is saved to
   `feedback.json`, and the evaluator is skipped for that round. A rejected or
   revised evaluation also writes feedback in its own round. The next default
   proposer reads the previous round's feedback. Custom proposal validation
@@ -126,17 +128,18 @@ does not schedule work or use DSH.
 ## Code ownership
 
 - `src/index.ts` exports the existing public API; `src/contracts.ts` owns setup,
-  stage interfaces and services. `src/domain/types.ts` owns domain types.
+  serializable input/option schemas, stage interfaces and services. `src/domain/types.ts` owns domain types.
 - `src/domain/schemas.ts` owns shared structured-output schemas;
   `src/domain/validation.ts` owns trace/spec/decision invariants;
   `src/domain/sources.ts` owns native keys, indexing and cloned source lookup.
-- `src/trace/otel.ts` parses OTLP and `src/trace/projection.ts` formats projected text.
+- `src/trace/schemas.ts` owns supported OTLP wire schemas; `src/trace/otel.ts`
+  parses them and `src/trace/projection.ts` formats projected text.
 - `src/stages/` owns enrichment/projection behavior and proposal/evaluation instructions.
   `src/agent/run-agent.ts` owns construction and execution for both model stages,
   including tools, tracing, context hooks and the twelve-step limit.
 - `src/agent/checkpoint.ts` defines checkpoint content; `context-management.ts`
   owns budget estimation and history replacement; `model-trace.ts` owns logging.
-  File/source tools live in `src/agent/tools/`.
+  File/source tools and their schemas live in `src/agent/tools/`.
 - `src/dream.ts` composes stages, validates results against domain rules, writes
   projections and controls retries. `src/workspace.ts` owns run preparation/writes.
 - Domain has no AI SDK/agent imports; stages do not construct SDK agents; core

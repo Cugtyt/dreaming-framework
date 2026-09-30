@@ -288,3 +288,53 @@ test('keeps scope on an individual event beneath a mixed span', () => {
   assert.equal('subject' in prompt, false)
   assert.equal(parsed.records[0]?.attributes?.['harness_rsi.scope'], undefined)
 })
+
+test('arbitrary own attribute keys survive parsing, cloning, and enrichment', () => {
+  const input = otelTrace()
+  const attributes = requireValue(
+    requireValue(requireValue(input.resourceSpans[0]).scopeSpans[0]).spans[1],
+  ).attributes
+  attributes.push({ key: 'constructor', value: { stringValue: 'literal' } } as never)
+  attributes.push({
+    key: '__proto__',
+    value: { kvlistValue: { values: [{ key: '__proto__', value: { stringValue: 'nested' } }] } },
+  } as never)
+  const parsed = parseOtelTrace(input)
+  const record = requireValue(parsed.records[1])
+  const parsedAttributes = requireValue(record.attributes)
+  assert.equal(record.attributes?.constructor, 'literal')
+  assert.equal(Object.hasOwn(parsedAttributes, '__proto__'), true)
+  assert.deepEqual(
+    Object.getOwnPropertyDescriptor(parsedAttributes, '__proto__')?.value,
+    JSON.parse('{"__proto__":"nested"}'),
+  )
+  assert.deepEqual(applyTraceAdditions(parsed, {}).records[1], record)
+  assert.doesNotThrow(() => validateTrace(applyTraceAdditions(parsed, {})))
+  attributes.push({ key: 'constructor', value: { stringValue: 'duplicate' } } as never)
+  assert.throws(() => parseOtelTrace(input), /duplicate attribute constructor/)
+})
+
+test('schemas reject malformed AnyValues and true nested duplicate keys', () => {
+  const input = otelTrace()
+  const attributes = requireValue(
+    requireValue(requireValue(input.resourceSpans[0]).scopeSpans[0]).spans[1],
+  ).attributes
+  attributes.push({
+    key: 'nested',
+    value: {
+      kvlistValue: {
+        values: [
+          { key: 'constructor', value: { stringValue: 'one' } },
+          { key: 'constructor', value: { stringValue: 'two' } },
+        ],
+      },
+    },
+  } as never)
+  assert.throws(() => parseOtelTrace(input), /duplicate kvlistValue key constructor/)
+  attributes.pop()
+  attributes.push({ key: 'invalid', value: { stringValue: 'two', boolValue: false } } as never)
+  assert.throws(() => parseOtelTrace(input), /AnyValue must contain one value/)
+  attributes.pop()
+  attributes.push({ key: 'invalid', value: { doubleValue: Number.POSITIVE_INFINITY } } as never)
+  assert.throws(() => parseOtelTrace(input), /doubleValue/)
+})

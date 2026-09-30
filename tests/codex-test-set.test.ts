@@ -170,3 +170,36 @@ test('review reports an executed evaluator even when the final result has no pro
   )
   assert.match(review.manualChecks.evaluator, /executed in 1 attempt/)
 })
+
+test('review counts only equal read results even when a later read changes', () => {
+  const records = ['same', 'changed', 'same'].flatMap((content, index) => [
+    {
+      span_id: `call-${index}`,
+      kind: 'gen_ai.tool.call',
+      attributes: {
+        'gen_ai.tool.name': 'read',
+        'gen_ai.tool.call.arguments': '{"path":"constructor"}',
+      },
+    },
+    {
+      span_id: `result-${index}`,
+      parent_id: `call-${index}`,
+      kind: 'gen_ai.tool.call.result',
+      content,
+    },
+  ])
+  const review = reviewCase(
+    caseDefinitions[0],
+    {
+      trace_id: 'a'.repeat(32),
+      harness_version: 'synthetic',
+      records,
+    },
+    { kind: 'no_proposal', reason: 'Inspect' },
+    'caller_supplied',
+    0,
+  )
+  assert.equal(review.observations.readCounts.byPath.constructor, 3)
+  assert.equal(review.observations.repeatedUnchangedReadEvidence.detected, true)
+  assert.equal(review.observations.repeatedUnchangedReadEvidence.occurrences, 2)
+})

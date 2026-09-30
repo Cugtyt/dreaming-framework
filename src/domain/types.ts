@@ -1,56 +1,15 @@
 import type { z } from 'zod'
-import type {
-  evaluationDecisionSchema,
-  improvementSpecSchema,
-  noProposalSchema,
-  sourceReferenceSchema,
-} from './schemas.ts'
+import type * as schemas from './schemas.ts'
 
-export type Scope = 'in' | 'out'
-
-export interface TraceRecord {
-  span_id: string
-  event_index?: number
-  parent_id?: string
-  kind: string
-  time?: string
-  content?: unknown
-  attributes?: Record<string, unknown>
-}
-
-export interface TraceSession {
-  trace_id: string
-  harness_version: string
-  records: TraceRecord[]
-}
-
-export interface TraceDraft {
-  trace_id: string
-  harness_version?: string
-  records: TraceRecord[]
-}
-
-export interface TraceAdditions {
-  harnessVersion?: string
-  scopes?: Array<{ reference: SourceReference; scope: Scope }>
-  evaluations?: Array<{
-    name: string
-    value: number
-    target: number
-    weight?: number
-    time: string
-  }>
-}
-
+export type Scope = z.infer<typeof schemas.scopeSchema>
+export type TraceRecord = z.infer<typeof schemas.traceRecordSchema>
+export type TraceSession = z.infer<typeof schemas.traceSessionSchema>
+export type TraceDraft = z.infer<typeof schemas.traceDraftSchema>
+export type TraceAdditions = z.infer<typeof schemas.traceAdditionsSchema>
 export type SessionView = TraceSession
-
-export type SourceReference = z.infer<typeof sourceReferenceSchema>
-export type ImprovementSpec = z.infer<typeof improvementSpecSchema>
-export type NoProposal = z.infer<typeof noProposalSchema>
-export type EvaluationDecision = z.infer<typeof evaluationDecisionSchema>
-
-export type DreamResult =
-  | { kind: 'spec'; spec: ImprovementSpec; evaluation: EvaluationDecision }
-  | NoProposal
-
+export type SourceReference = z.infer<typeof schemas.sourceReferenceSchema>
+export type ImprovementSpec = z.infer<typeof schemas.improvementSpecSchema>
+export type NoProposal = z.infer<typeof schemas.noProposalSchema>
+export type EvaluationDecision = z.infer<typeof schemas.evaluationDecisionSchema>
+export type DreamResult = z.infer<typeof schemas.dreamResultSchema>
 export type SourceLookup = (reference: SourceReference) => TraceRecord | undefined

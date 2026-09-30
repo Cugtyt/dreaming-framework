@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from 'node:util'
+import { traceSessionSchema } from '../domain/schemas.ts'
 import type { SessionView, TraceSession } from '../domain/types.ts'
 import { invalid, object } from '../domain/validation.ts'
 
@@ -13,7 +14,7 @@ export function defaultProjectSession(trace: TraceSession): SessionView {
 }
 
 export function validateView(view: unknown, original: TraceSession): asserts view is SessionView {
-  if (!object(view) || !Array.isArray(view.records))
+  if (!traceSessionSchema.safeParse(view).success || !object(view) || !Array.isArray(view.records))
     invalid(`projection for ${original.trace_id} is invalid`)
   if (
     view.trace_id !== original.trace_id ||

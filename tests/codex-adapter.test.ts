@@ -157,3 +157,64 @@ test('converted Codex traces work with framework enrichment and dreaming', async
   }).dream(codexAdapter.convertSession(session()), { workspaceDirectory })
   assert.deepEqual(result, { kind: 'no_proposal', reason: 'Conversion verified' })
 })
+
+test('invalid message roles are rejected only for completed turns', () => {
+  const completed = [
+    line('session_meta', { id: 'roles', cli_version: '1' }),
+    line('event_msg', { type: 'task_started', turn_id: 'done' }),
+    message('user', 'Read'),
+  ]
+  const end = line('event_msg', { type: 'task_complete' })
+  for (const role of [{ role: 'invalid' }, {}]) {
+    const invalidMessage = line('response_item', {
+      type: 'message',
+      ...role,
+      content: [{ type: 'input_text', text: 'Invalid role' }],
+    })
+    assert.throws(
+      () => codexAdapter.convertSession([...completed, invalidMessage, end].join('\n')),
+      /supported payload.*line 4/,
+    )
+    assert.deepEqual(
+      codexAdapter.convertSession(
+        [
+          ...completed,
+          end,
+          line('event_msg', { type: 'task_started', turn_id: 'unfinished' }),
+          invalidMessage,
+        ].join('\n'),
+      ),
+      codexAdapter.convertSession([...completed, end].join('\n')),
+    )
+  }
+})
+
+test('supported payload shapes are validated only for completed turns', () => {
+  const invalidMessage = line('response_item', {
+    type: 'message',
+    role: 'assistant',
+    content: 'wrong',
+  })
+  const prefix = [
+    line('session_meta', { id: 'shape', cli_version: '1' }),
+    line('event_msg', { type: 'task_started', turn_id: 'done' }),
+    message('user', 'Read'),
+  ]
+  assert.throws(
+    () =>
+      codexAdapter.convertSession(
+        [...prefix, invalidMessage, line('event_msg', { type: 'task_complete' })].join('\n'),
+      ),
+    /supported payload.*line 4/,
+  )
+  assert.doesNotThrow(() =>
+    codexAdapter.convertSession(
+      [
+        ...prefix,
+        line('event_msg', { type: 'task_complete' }),
+        line('event_msg', { type: 'task_started', turn_id: 'unfinished' }),
+        invalidMessage,
+      ].join('\n'),
+    ),
+  )
+})

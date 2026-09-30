@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { MockLanguageModelV3 } from 'ai/test'
 import { fileTools } from '../src/agent/tools/file-tools.ts'
+import { ValidationError, validateCandidate } from '../src/domain/validation.ts'
 import { createDreamer } from '../src/index.ts'
 import { requireValue } from './helpers.ts'
 
@@ -137,7 +138,9 @@ test('one default proposer explores projections and receives evaluator feedback'
   const thirdRequest = requireValue(requests[2])
   assert.match(firstRequest, /score|target/i)
   assert.match(firstRequest, /searchFiles/)
-  assert.match(firstRequest, /first page/)
+  assert.match(firstRequest, /follow nextOffset until null/)
+  assert.match(firstRequest, /beginning to end/)
+  assert.match(firstRequest, /partial page/)
   assert.match(firstRequest, /causal link/)
   assert.match(secondRequest, /unrelated error/)
   assert.doesNotMatch(firstRequest, /Raw user request for searching|\[compacted\]/)
@@ -239,6 +242,128 @@ test('invalid default citations stop at the attempt limit with feedback in each 
     assert.equal(existsSync(join(directory, 'attempts', String(attempt), 'proposal.json')), true)
     assert.equal(existsSync(join(directory, 'attempts', String(attempt), 'feedback.json')), true)
     assert.equal(existsSync(join(directory, 'attempts', String(attempt), 'evaluation.json')), false)
+  }
+})
+
+test('default no-proposal reference errors retry with saved feedback and skip evaluation', async () => {
+  const invalid = {
+    kind: 'no_proposal',
+    reason: 'No bounded change is supported',
+    references: [{ ...scoreRef, event_index: 19 }],
+  }
+  const valid = { ...invalid, references: [scoreRef] }
+  const model = mockModel([{ result: invalid }, { result: valid }])
+  const directory = workspaceDirectory()
+  const result = await createDreamer({ model }).dream([otelTrace()], {
+    workspaceDirectory: directory,
+  })
+  assert.deepEqual(result, valid)
+  assert.equal(model.doGenerateCalls.length, 2)
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(directory, 'attempts', '1', 'proposal.json'), 'utf8')),
+    invalid,
+  )
+  assert.match(
+    readFileSync(join(directory, 'attempts', '1', 'feedback.json'), 'utf8'),
+    /unresolved reference/,
+  )
+  assert.match(
+    JSON.stringify(requireValue(model.doGenerateCalls[1]).prompt),
+    /attempts\/1\/feedback.json/,
+  )
+  for (const attempt of [1, 2]) {
+    assert.equal(existsSync(join(directory, 'attempts', String(attempt), 'evaluation.json')), false)
+    assert.equal(
+      existsSync(join(directory, 'attempts', String(attempt), 'evaluator-model.jsonl')),
+      false,
+    )
+    assert.equal(modelTrace(directory, attempt, 'proposer').at(-1)?.event, 'result')
+  }
+})
+
+test('default no-proposal reference errors stop at the attempt limit', async () => {
+  const invalid = {
+    kind: 'no_proposal',
+    reason: 'No bounded change is supported',
+    references: [{ ...scoreRef, event_index: 19 }],
+  }
+  const model = mockModel([{ result: invalid }, { result: invalid }])
+  const directory = workspaceDirectory()
+  const result = await createDreamer({ model, maxProposalAttempts: 2 }).dream([otelTrace()], {
+    workspaceDirectory: directory,
+  })
+  assert.equal(result.kind, 'no_proposal')
+  assert.match(result.reason, /Proposal attempt limit reached:.*unresolved reference/)
+  assert.equal(model.doGenerateCalls.length, 2)
+  for (const attempt of [1, 2]) {
+    assert.deepEqual(
+      JSON.parse(
+        readFileSync(join(directory, 'attempts', String(attempt), 'proposal.json'), 'utf8'),
+      ),
+      invalid,
+    )
+    assert.match(
+      readFileSync(join(directory, 'attempts', String(attempt), 'feedback.json'), 'utf8'),
+      /unresolved reference/,
+    )
+    assert.equal(existsSync(join(directory, 'attempts', String(attempt), 'evaluation.json')), false)
+    assert.equal(
+      existsSync(join(directory, 'attempts', String(attempt), 'evaluator-model.jsonl')),
+      false,
+    )
+  }
+})
+
+test('custom no-proposal reference errors fail immediately', async () => {
+  let calls = 0
+  const directory = workspaceDirectory()
+  await assert.rejects(
+    createDreamer({
+      stages: {
+        proposeSpec: () => {
+          calls++
+          return {
+            kind: 'no_proposal',
+            reason: 'Unsupported',
+            references: [{ ...scoreRef, event_index: 19 }],
+          }
+        },
+        evaluateSpec: () => {
+          throw new Error('No proposal to evaluate')
+        },
+      },
+    }).dream([otelTrace()], { workspaceDirectory: directory }),
+    (error: unknown) => error instanceof ValidationError && error.category === 'reference',
+  )
+  assert.equal(calls, 1)
+  for (const name of [
+    'proposal.json',
+    'feedback.json',
+    'evaluation.json',
+    'evaluator-model.jsonl',
+  ]) {
+    assert.equal(existsSync(join(directory, 'attempts', '1', name)), false)
+  }
+})
+
+test('malformed default no-proposal output fails without retrying', async () => {
+  const model = mockModel([
+    { result: { kind: 'no_proposal', reason: '', references: [scoreRef] } },
+    { result: { kind: 'no_proposal', reason: 'Supported', references: [scoreRef] } },
+  ])
+  const directory = workspaceDirectory()
+  await assert.rejects(
+    createDreamer({ model }).dream([otelTrace()], { workspaceDirectory: directory }),
+  )
+  assert.equal(model.doGenerateCalls.length, 1)
+  assert.equal(modelTrace(directory, 1, 'proposer').at(-1)?.event, 'error')
+  for (const name of [
+    'proposal.json',
+    'feedback.json',
+    'evaluation.json',
+    'evaluator-model.jsonl',
+  ]) {
+    assert.equal(existsSync(join(directory, 'attempts', '1', name)), false)
   }
 })
 
@@ -523,3 +648,32 @@ for (const stage of ['proposer', 'evaluator'] as const) {
     assert.doesNotMatch(JSON.stringify(summaryRequest.prompt), /read-2/)
   })
 }
+
+test('citation retry errors have stable categories independent of message matching', () => {
+  const candidate = {
+    issue: 'issue',
+    proposal: 'proposal',
+    predict: 'predict',
+    baseHarnessVersion: 'h@1',
+    references: [],
+  }
+  for (const references of [
+    [],
+    [{ trace_id: 'trace', span_id: 'missing' }],
+    [{ trace_id: 'trace', span_id: 'missing', extra: true }],
+  ]) {
+    assert.throws(
+      () => validateCandidate({ ...candidate, references }, new Map(), new Set(), 'h@1'),
+      (error: unknown) => error instanceof ValidationError && error.category === 'reference',
+    )
+  }
+  assert.throws(
+    () => validateCandidate({ ...candidate, issue: '' }, new Map(), new Set(), 'h@1'),
+    (error: unknown) => error instanceof ValidationError && error.category === 'shape',
+  )
+  assert.throws(
+    () =>
+      validateCandidate({ ...candidate, baseHarnessVersion: 'h@2' }, new Map(), new Set(), 'h@1'),
+    (error: unknown) => error instanceof ValidationError && error.category === 'invariant',
+  )
+})

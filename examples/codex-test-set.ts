@@ -27,6 +27,32 @@ export const caseDefinitions = [
   },
 ] as const
 
+function readRecords(session: TraceSession) {
+  const results = new Map<string, TraceRecord>()
+  for (const record of session.records) {
+    if (record.kind !== 'gen_ai.tool.call.result' || record.parent_id === undefined) continue
+    results.set(record.parent_id, record)
+  }
+  return session.records
+    .filter(
+      (record) =>
+        record.kind === 'gen_ai.tool.call' && record.attributes?.['gen_ai.tool.name'] === 'read',
+    )
+    .map((call) => {
+      let path = '<unknown>'
+      const raw = call.attributes?.['gen_ai.tool.call.arguments']
+      if (typeof raw === 'string') {
+        try {
+          const parsed = JSON.parse(raw) as { path?: unknown }
+          if (typeof parsed.path === 'string') path = parsed.path
+        } catch {
+          // The adapter preserves malformed tool arguments as source text.
+        }
+      }
+      return { call, path, result: results.get(call.span_id) }
+    })
+}
+
 export function reviewCase(
   definition: (typeof caseDefinitions)[number],
   trace: TraceSession,
@@ -34,33 +60,8 @@ export function reviewCase(
   modelMode: 'scripted_mock' | 'caller_supplied',
   evaluatedAttempts: number,
 ) {
-  const readRecords = (session: TraceSession) => {
-    const results = new Map<string, TraceRecord>()
-    for (const record of session.records) {
-      if (record.kind !== 'gen_ai.tool.call.result' || record.parent_id === undefined) continue
-      results.set(record.parent_id, record)
-    }
-    return session.records
-      .filter(
-        (record) =>
-          record.kind === 'gen_ai.tool.call' && record.attributes?.['gen_ai.tool.name'] === 'read',
-      )
-      .map((call) => {
-        let path = '<unknown>'
-        const raw = call.attributes?.['gen_ai.tool.call.arguments']
-        if (typeof raw === 'string') {
-          try {
-            const parsed = JSON.parse(raw) as { path?: unknown }
-            if (typeof parsed.path === 'string') path = parsed.path
-          } catch {
-            // The adapter preserves malformed tool arguments as source text.
-          }
-        }
-        return { call, path, result: results.get(call.span_id) }
-      })
-  }
   const reads = readRecords(trace)
-  const byPath: Record<string, number> = {}
+  const byPath: Record<string, number> = Object.create(null)
   for (const read of reads) byPath[read.path] = (byPath[read.path] ?? 0) + 1
   const feedbackScores = trace.records
     .filter((record) => record.kind === 'gen_ai.evaluation.result')
@@ -81,15 +82,18 @@ export function reviewCase(
     interpretation: 'No repeated unchanged read was observed in this synthetic fixture.',
   }
   for (const [path, occurrences] of byReadPath) {
-    if (occurrences.length < 2) continue
-    const first = occurrences[0]?.result?.content
-    const second = occurrences[1]?.result?.content
-    if (typeof first === 'string' && first === second) {
+    const counts = new Map<string, number>()
+    for (const read of occurrences) {
+      const content = read.result?.content
+      if (typeof content === 'string') counts.set(content, (counts.get(content) ?? 0) + 1)
+    }
+    const repeated = [...counts].find(([, count]) => count >= 2)
+    if (repeated !== undefined) {
       repeatedUnchangedReadEvidence = {
         detected: true,
         path,
-        result: first,
-        occurrences: occurrences.length,
+        result: repeated[0],
+        occurrences: repeated[1],
         interpretation:
           'Observed equality in this synthetic fixture; this is not a general unchanged-file guarantee.',
       }
@@ -155,20 +159,7 @@ export function createCaseModel(
     span_id: record.span_id,
     ...(record.event_index === undefined ? {} : { event_index: record.event_index }),
   })
-  const readRecords = () => {
-    const results = new Map<string, TraceRecord>()
-    for (const record of trace.records) {
-      if (record.kind !== 'gen_ai.tool.call.result' || record.parent_id === undefined) continue
-      results.set(record.parent_id, record)
-    }
-    return trace.records
-      .filter(
-        (record) =>
-          record.kind === 'gen_ai.tool.call' && record.attributes?.['gen_ai.tool.name'] === 'read',
-      )
-      .map((call) => ({ call, result: results.get(call.span_id) }))
-  }
-  const reads = readRecords()
+  const reads = readRecords(trace)
   const references = reads.flatMap(({ call, result }) => [
     sourceReference(call),
     ...(result === undefined ? [] : [sourceReference(result)]),

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'node:fs'
+import { existsSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -455,4 +455,25 @@ test('rejects incomplete labels, invalid citations, and changed projections', as
     }),
     /changed trace identity/,
   )
+})
+
+test('invalid per-run overrides fail before creating even an empty run workspace', async () => {
+  const parent = mkdtempSync(join(tmpdir(), 'dream-invalid-overrides-'))
+  const dreamer = createDreamer({
+    stages: {
+      proposeSpec: () => ({ kind: 'no_proposal', reason: 'None' }),
+      evaluateSpec: () => ({ kind: 'reject', reason: 'None' }),
+    },
+  })
+  for (const inputs of [[], [otelTrace()]]) {
+    const workspaceDirectory = join(parent, String(inputs.length))
+    await assert.rejects(
+      dreamer.dream(inputs, {
+        workspaceDirectory,
+        stages: { projectSession: undefined } as unknown as StageOverrides,
+      }),
+      /projectSession must be a function/,
+    )
+    assert.equal(existsSync(workspaceDirectory), false)
+  }
 })
