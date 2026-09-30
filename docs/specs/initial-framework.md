@@ -20,7 +20,8 @@ does not schedule work or use DSH.
   unreadable files, and invalid traces report their source filename. An empty folder
   behaves like an empty list. Source files remain unchanged; loading completes after
   option/stage validation and before workspace creation. Use a separate output
-  workspace. Codex JSONL continues through its adapter. See [trace inputs](trace-input.md).
+  workspace. Codex and exported DSH Session JSONL continue through their adapters.
+  See [trace inputs](trace-input.md).
   The host supplies an AI SDK `LanguageModel` when
   any default reasoning stage is used. If both reasoning stages are
   supplied at setup, no model is required. The framework owns no model resource

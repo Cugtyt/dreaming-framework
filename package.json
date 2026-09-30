@@ -11,6 +11,10 @@
     "./extensions/codex": {
       "types": "./dist/extensions/codex/index.d.ts",
       "import": "./dist/extensions/codex/index.js"
+    },
+    "./extensions/dsh": {
+      "types": "./dist/extensions/dsh/index.d.ts",
+      "import": "./dist/extensions/dsh/index.js"
     }
   },
   "files": [

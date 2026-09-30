@@ -8,8 +8,8 @@ explores all projections; a separate evaluation `ToolLoopAgent` accepts the
 proposal or sends feedback for another attempt.
 
 The [framework spec](docs/specs/initial-framework.md) defines the current
-behavior and acceptance contract. This repository has no DSH import, built-in
-model provider, scheduler, or remote service.
+behavior and acceptance contract. This repository has no DSH runtime dependency,
+built-in model provider, scheduler, or remote service.
 
 ## Use
 
@@ -90,6 +90,43 @@ records. Scoring belongs to enrichment. The
 [adapter contract](docs/specs/codex-adapter.md) defines the conversion rules;
 [dream-codex-session.ts](examples/dream-codex-session.ts) shows the complete call.
 Harness adapters live in `extensions/`; the core does not import them.
+
+## DSH extension
+
+The optional DSH adapter converts an exported DSH Session JSONL log into OTLP
+traces:
+
+```ts
+import { createDreamer } from 'dreaming-framework'
+import { dshAdapter } from 'dreaming-framework/extensions/dsh'
+import { enrichUserFeedback } from './examples/dream-with-feedback.ts'
+
+const traces = await dshAdapter.readSession(sessionPath, {
+  harnessVersion: 'dsh@0.2.0-rc.2',
+})
+const result = await createDreamer({
+  model,
+  stages: { enrichTrace: enrichUserFeedback },
+}).dream(traces, { workspaceDirectory })
+```
+
+In DSH, choose **Download session log** or run `/export`, extract the ZIP, and
+pass its uncompressed `session.v3.jsonl` or `session.v4.jsonl` file. Direct
+`.jsonl.zstd` persistence files are intentionally unsupported because DSH owns
+their framing, migration, and recovery behavior. `dshAdapter.convertSession(jsonl,
+{ harnessVersion })` accepts Session JSONL text directly. `harnessVersion` is
+required because the Session format version describes storage compatibility, not
+the deployed harness behavior; use the actual DSH release, build, or configuration
+identifier.
+
+The adapter keeps supported records from turns ending with `reason.kind ===
+"completed"`, maps append-origin messages, requested and started tool calls, and
+tool results, and preserves model-history replacements as separate in-scope
+evidence. It omits private reasoning, enforces v3/v4 identities, preserves DSH
+sequence order across clock drift, and produces no scores. The existing feedback
+enricher can derive evaluations from follow-up user messages.
+See the [adapter contract](docs/specs/dsh-adapter.md) and
+[dream-dsh-session.ts](examples/dream-dsh-session.ts).
 
 ## Offline examples
 
@@ -310,8 +347,8 @@ instructions. Both reasoning stages call `src/agent/run-agent.ts`, which owns
 agent construction, tools, context hooks, execution, and model logging.
 `src/agent/context-management.ts` handles budgets and history replacement;
 `src/agent/checkpoint.ts` defines the structured progress checkpoint.
-File/source tools and their schemas live in `src/agent/tools/`. Codex conversion stays in
-`extensions/codex/` behind its separate package export.
+File/source tools and their schemas live in `src/agent/tools/`. Codex and DSH
+session conversion stays in `extensions/` behind separate package exports.
 
 The dependency boundaries are checked in `tests/architecture.test.ts`.
 See [project boundaries](docs/specs/project-boundaries.md) for the ownership contract.
@@ -337,8 +374,8 @@ after implementation and makes the adoption decision.
 The harness adapter owns redaction before traces are passed to `dream()`. Remove
 sensitive text from messages, tool arguments, tool results, and other attributes
 while preserving trace identities, chronology, scope labels, and evaluations.
-The current Codex adapter preserves supported source content and does not redact
-it; callers must sanitize session input or its converted OTLP output before
+The current Codex and DSH adapters preserve supported source content and do not
+redact it; callers must sanitize session input or its converted OTLP output before
 submitting it to dreaming.
 
 `enrichTrace` adds labels and evaluations; it cannot alter existing evidence.

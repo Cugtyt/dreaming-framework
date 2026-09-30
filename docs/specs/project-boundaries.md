@@ -28,7 +28,7 @@ changes belong to this work. Other worktrees are outside scope.
 - `agent/model-trace.ts` owns model/tool/compaction logging with a named contract.
   `agent/tools/` owns file and source tools.
 - `workspace.ts` owns confined workspace preparation and writes only.
-- `extensions/codex/` stays outside core and converts Codex sessions into OTLP.
+- `extensions/` stays outside core and converts supported harness sessions into OTLP.
 
 Domain modules cannot import AI SDK or agents. Stages cannot construct ToolLoopAgent.
 Core cannot import extensions. Shared abstractions have current consumers: source
