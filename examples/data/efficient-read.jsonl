@@ -1,0 +1,11 @@
+{"timestamp":"2026-09-30T11:00:00Z","type":"session_meta","payload":{"id":"synthetic-efficient-read","cli_version":"0.155.0"}}
+{"timestamp":"2026-09-30T11:00:01Z","type":"event_msg","payload":{"type":"task_started","turn_id":"task-1"}}
+{"timestamp":"2026-09-30T11:00:02Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Review the synthetic guide and answer the question."}]}}
+{"timestamp":"2026-09-30T11:00:03Z","type":"response_item","payload":{"type":"function_call","call_id":"read-1","name":"read","arguments":"{\"path\":\"synthetic/guide.txt\"}"}}
+{"timestamp":"2026-09-30T11:00:04Z","type":"response_item","payload":{"type":"function_call_output","call_id":"read-1","output":"Synthetic guide: preserve the cited steps."}}
+{"timestamp":"2026-09-30T11:00:05Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The cited steps are preserved."}]}}
+{"timestamp":"2026-09-30T11:00:06Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"task-1"}}
+{"timestamp":"2026-09-30T11:00:07Z","type":"event_msg","payload":{"type":"task_started","turn_id":"feedback-1"}}
+{"timestamp":"2026-09-30T11:00:08Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Looks better."}]}}
+{"timestamp":"2026-09-30T11:00:09Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Feedback recorded."}]}}
+{"timestamp":"2026-09-30T11:00:10Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"feedback-1"}}

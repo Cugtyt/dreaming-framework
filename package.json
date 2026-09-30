@@ -1,7 +1,6 @@
 {
   "name": "dreaming-framework",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "types": "./dist/src/index.d.ts",
   "exports": {
@@ -31,7 +30,6 @@
     "check": "biome check ."
   },
   "devDependencies": {
-    "@ai-sdk/openai-compatible": "^3.0.57",
     "@biomejs/biome": "^2.5.14",
     "@types/node": "26.6.2",
     "typescript": "6.0.3"
@@ -39,5 +37,6 @@
   "dependencies": {
     "ai": "^7.0.118",
     "zod": "^4.6.5"
-  }
+  },
+  "license": "MIT"
 }

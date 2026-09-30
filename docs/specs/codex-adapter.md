@@ -43,7 +43,8 @@ The adapter owns Codex parsing and OTLP construction. `index.ts` exports it;
 `session-to-otel.ts` owns the two conversion functions. The example
 `dreamCodexSession(sessionPath, model, workspaceDirectory)` connects the adapter
 to the existing feedback enricher and framework. No provider or dependency is
-added. Historical samples and the core stage APIs are unchanged.
+added. The runnable example uses a synthetic trace and mock model; historical
+samples are excluded. The core stage APIs are unchanged.
 
 Tests use synthetic Codex records to verify completed-turn filtering, message
 and tool mapping, stable IDs, malformed-input errors, file reading, and use in

@@ -1,0 +1,9 @@
+{"timestamp":"2026-09-30T12:00:00Z","type":"session_meta","payload":{"id":"synthetic-ambiguous-feedback","cli_version":"0.155.0"}}
+{"timestamp":"2026-09-30T12:00:01Z","type":"event_msg","payload":{"type":"task_started","turn_id":"task-1"}}
+{"timestamp":"2026-09-30T12:00:02Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Answer the synthetic question from the available context."}]}}
+{"timestamp":"2026-09-30T12:00:03Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The synthetic answer is ready."}]}}
+{"timestamp":"2026-09-30T12:00:04Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"task-1"}}
+{"timestamp":"2026-09-30T12:00:05Z","type":"event_msg","payload":{"type":"task_started","turn_id":"feedback-1"}}
+{"timestamp":"2026-09-30T12:00:06Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"This is wrong."}]}}
+{"timestamp":"2026-09-30T12:00:07Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Feedback recorded."}]}}
+{"timestamp":"2026-09-30T12:00:08Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"feedback-1"}}

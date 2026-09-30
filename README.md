@@ -63,7 +63,9 @@ Harness adapters live in `extensions/`; the core does not import them.
 
 ## Offline examples
 
-The hello-world example uses a synthetic trace and an offline mock model.
+The [hello-world example](examples/hello.ts) uses a synthetic trace and an AI SDK
+mock model. It runs without credentials, a provider endpoint, or local session
+history. Its scripted responses demonstrate the pipeline, not proposal quality.
 
 For an example that starts with already supplied OTLP traces:
 
@@ -80,7 +82,67 @@ span IDs and adds them to the context view. It leaves ambiguous
 messages unscored. See the [example contract](docs/specs/feedback-enrichment-example.md)
 for the score rule and input assumptions.
 
-The hello-world example saves its returned outcome in `result.json`.
+## Codex session inspection suite
+
+Run all three synthetic Codex JSONL cases with an offline mock model:
+
+```sh
+node examples/codex-test-set.ts
+```
+
+The command prints a fresh run directory with one workspace per case:
+
+| Case | Observed behavior | Expected judgment |
+| --- | --- | --- |
+| `repeated-read` | The same unchanged file is read twice, followed by negative feedback | Propose reusing an available result while preserving rereads after edits |
+| `efficient-read` | The same task succeeds with one read and positive feedback | Preserve successful behavior; no proposal |
+| `ambiguous-feedback` | Negative feedback supplies no supported cause | No unsupported proposal |
+
+Each case starts with a synthetic completed Codex session, uses the existing
+adapter and feedback enricher, then runs the default projection and reasoning
+stages. The repeated-read mock exercises file and source tools before returning
+its scripted proposal and evaluator acceptance. The other mocks return
+`no_proposal`, so the evaluator does not run for those cases.
+
+Inspect these files in each case directory:
+
+- `adapter-output.json`: the adapter's OTLP output.
+- `enriched-trace.json`: the parsed trace with feedback evaluations added.
+- `projections/<trace_id>.txt`: the compacted view supplied through model tools.
+- `attempts/<number>/`: proposals, applicable evaluator decisions, retry feedback,
+  and default-agent model logs.
+- `result.json`: the returned `dreamResult` and a `review` with observed read counts,
+  feedback scores, expected judgment, manual quality checks, and evidence level.
+
+Snapshots and the merged result are written after dreaming completes. Expected
+judgments are not available to the model during proposal or evaluation. There is
+no separate JSON projection or review file.
+
+To inspect generated proposals with your own AI SDK `LanguageModel`, import the
+runner and supply your model:
+
+```ts
+import { runCodexTestSet } from './examples/codex-test-set.ts'
+
+const run = await runCodexTestSet({ model })
+console.log(run.outputDirectory)
+```
+
+You can also supply `outputDirectory`, which must be empty. Importing the runner
+does not start the CLI. No provider or credentials are bundled with the suite.
+
+The mock run verifies pipeline behavior, not spec quality. The paired synthetic
+sessions illustrate an observed difference; they do not measure an improvement
+caused by implementing the generated proposal. A supplied-model run produces
+predictions for human review. Check grounding, actionability, causal connection to
+the metric, and preservation of successful behavior. Actual improvement requires
+implementing a proposal and comparing harness versions on held-out tasks. See the
+[suite contract](docs/specs/codex-inspection-suite.md).
+
+## Run artifacts and stages
+
+The hello-world example prints a fresh `results/<UTC timestamp>-<unique suffix>/`
+directory and saves the returned outcome as `result.json`.
 `projections/<trace_id>.txt` holds one chronological text projection per session.
 The trace tag carries the trace ID and harness version; each item tag carries a
 native span ID and optional event index. Evaluation tags carry the score, target,
@@ -95,10 +157,9 @@ contain context the model saw; provider headers and credentials are excluded.
 Custom reasoning stages manage their own logs. The model's file listing does not
 include these `.jsonl` files.
 
-Its `requirement`, `skill.load`, and `tool.result` spans carry item-level
-`harness_rsi.scope` attributes, with no second scope field on the parsed item.
-A separate `gen_ai.evaluation.result` span
-carries the observed score and target. Those values supply the improvement
+The hello-world trace's `requirement`, `skill.load`, and `tool.result` spans carry
+item-level `harness_rsi.scope` attributes. A separate `gen_ai.evaluation.result`
+span carries the observed score and target. Those values supply the improvement
 direction; there is no separate goal input. The OTLP Resource carries
 `harness_rsi.harness.version`. The returned spec uses that value as
 `baseHarnessVersion`, so the host can implement a change in a later version.
@@ -149,7 +210,8 @@ validation; `file-tools.ts` and `source-tool.ts` serve the two AI SDK stages.
 
 `pnpm check` enforces the repository's Biome style and lint rules. `pnpm build`
 emits JavaScript and declarations to `dist/` through the package entry point.
-The package remains private while its public release contract is undecided.
+The package is licensed under [MIT](LICENSE) and permits npm publication.
+Publication and API stability are separate release decisions.
 
 ## Boundary
 
@@ -161,3 +223,20 @@ a missing weight is `1` in the evaluator's input. The later `evaluateSpec` stage
 whether a candidate might improve those scores. Rejection feedback returns
 to spec proposal for another attempt. The host measures any actual gain
 after implementation and makes the adoption decision.
+
+## Data handling
+
+The harness adapter owns redaction before traces are passed to `dream()`. Remove
+sensitive text from messages, tool arguments, tool results, and other attributes
+while preserving trace identities, chronology, scope labels, and evaluations.
+The current Codex adapter preserves supported source content and does not redact
+it; callers must sanitize session input or its converted OTLP output before
+submitting it to dreaming.
+
+`enrichTrace` adds labels and evaluations; it cannot alter existing evidence.
+Projection compaction is not redaction: `getSource` can retrieve the unprojected
+content supplied to the framework. Default reasoning stages send that content
+to the caller's model provider and write model inputs, outputs, and tool results
+to local run logs. Excluding provider credentials does not remove secrets embedded
+in trace content. Apply the adapter's redaction policy before model submission
+and choose storage access and retention appropriate to the sanitized data.
