@@ -36,6 +36,31 @@ to separate proposal and evaluation `ToolLoopAgent` instances, with structured
 outputs and read-only file tools plus `getSource` for compacted evidence. A host can
 replace any reasoning stage to use different business logic or another model.
 
+## Codex extension
+
+The optional Codex adapter converts a session JSONL file into OTLP traces:
+
+```ts
+import { createDreamer } from 'dreaming-framework'
+import { codexAdapter } from 'dreaming-framework/extensions/codex'
+import { enrichUserFeedback } from './examples/dream-with-feedback.ts'
+
+const traces = await codexAdapter.readSession(sessionPath)
+const result = await createDreamer({
+  model,
+  stages: { enrichTrace: enrichUserFeedback },
+}).dream(traces, { workspaceDirectory })
+```
+
+`codexAdapter.convertSession(jsonl)` accepts session text directly. The adapter
+returns one trace for the completed turns of one session, with the Codex CLI
+version and item scope labels. It retains message text and tool content, links
+results to calls, and omits unfinished turns, reasoning, and unsupported
+records. Scoring belongs to enrichment. The
+[adapter contract](docs/specs/codex-adapter.md) defines the conversion rules;
+[dream-codex-session.ts](examples/dream-codex-session.ts) shows the complete call.
+Harness adapters live in `extensions/`; the core does not import them.
+
 ## Offline examples
 
 The hello-world example uses a synthetic trace and an offline mock model.
