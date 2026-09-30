@@ -3,9 +3,10 @@ import { existsSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } fro
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { fileTools } from '../src/agent/tools/file-tools.ts'
 import { createDreamer } from '../src/index.ts'
-import { fileTools } from '../src/stages/file-tools.ts'
-import { projectionText } from '../src/workspace.ts'
+import { projectionText } from '../src/trace/projection.ts'
+import { requireValue } from './helpers.ts'
 
 const traceId = 'a'.repeat(32)
 const spanId = '1'.repeat(16)
@@ -118,23 +119,25 @@ test('read-only file tools confine paths to the run workspace', async () => {
   writeFileSync(join(workspaceDirectory, 'inside.json'), '{"answer": 1}\n')
   writeFileSync(join(workspaceDirectory, 'inside.txt'), '<item>readable</item>\n')
   const tools = fileTools(workspaceDirectory)
-  const read = tools.readFile.execute!
-  const listed = await tools.listFiles.execute!({}, {} as never)
+  const read = requireValue(tools.readFile.execute)
+  const listFiles = requireValue(tools.listFiles.execute)
+  const toolOptions = { toolCallId: 'test', messages: [], context: undefined }
+  const listed = await listFiles({}, toolOptions)
   assert.deepEqual(listed, { files: ['inside.json', 'inside.txt'] })
-  const content = await read({ path: 'inside.json' }, {} as never)
+  const content = await read({ path: 'inside.json' }, toolOptions)
   assert.match(JSON.stringify(content), /answer/)
-  assert.match(JSON.stringify(await read({ path: 'inside.txt' }, {} as never)), /readable/)
+  assert.match(JSON.stringify(await read({ path: 'inside.txt' }, toolOptions)), /readable/)
   await assert.rejects(async () => {
-    await read({ path: '../outside.json' }, {} as never)
+    await read({ path: '../outside.json' }, toolOptions)
   }, /escapes/)
   await assert.rejects(async () => {
-    await read({ path: '/etc/passwd' }, {} as never)
+    await read({ path: '/etc/passwd' }, toolOptions)
   }, /relative/)
   const outsideDirectory = mkdtempSync(join(tmpdir(), 'dream-outside-'))
   writeFileSync(join(outsideDirectory, 'outside.json'), '{}')
   symlinkSync(join(outsideDirectory, 'outside.json'), join(workspaceDirectory, 'linked.json'))
   await assert.rejects(async () => {
-    await read({ path: 'linked.json' }, {} as never)
+    await read({ path: 'linked.json' }, toolOptions)
   }, /escapes/)
 })
 
@@ -144,14 +147,14 @@ test('search finds evaluation scores beyond the first read page', async () => {
   lines.push('"gen_ai.evaluation.score.value": 0')
   writeFileSync(join(workspaceDirectory, 'projection.json'), `{\n${lines.join(',\n')}\n}\n`)
   const tools = fileTools(workspaceDirectory)
-  const firstPage = (await tools.readFile.execute!({ path: 'projection.json' }, {} as never)) as {
-    content: string
-  }
+  const readFile = requireValue(tools.readFile.execute)
+  const searchFiles = requireValue(tools.searchFiles.execute)
+  const toolOptions = { toolCallId: 'test', messages: [], context: undefined }
+  const firstPage = await readFile({ path: 'projection.json' }, toolOptions)
+  assert.ok('content' in firstPage)
   assert.doesNotMatch(firstPage.content, /gen_ai.evaluation.score.value/)
-  const result = (await tools.searchFiles.execute!(
-    { query: 'gen_ai.evaluation.score.value' },
-    {} as never,
-  )) as { matches: Array<{ path: string; line: number }> }
+  const result = await searchFiles({ query: 'gen_ai.evaluation.score.value' }, toolOptions)
+  assert.ok('matches' in result)
   assert.deepEqual(
     result.matches.map((match) => ({ path: match.path, line: match.line })),
     [{ path: 'projection.json', line: 242 }],

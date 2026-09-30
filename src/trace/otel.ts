@@ -1,5 +1,5 @@
-import type { TraceDraft, TraceRecord } from './types.ts'
-import { invalid, object } from './validation.ts'
+import type { TraceDraft, TraceRecord } from '../domain/types.ts'
+import { invalid, object } from '../domain/validation.ts'
 
 type RecordObject = Record<string, unknown>
 
@@ -42,7 +42,8 @@ function anyValue(value: unknown): unknown {
     'kvlistValue',
   ].filter((key) => key in value)
   if (present.length !== 1) invalid('OTLP AnyValue must contain one value')
-  const key = present[0]!
+  const key = present[0]
+  if (key === undefined) invalid('OTLP AnyValue must contain one value')
   const raw = value[key]
   if (key === 'stringValue' || key === 'bytesValue') {
     if (typeof raw !== 'string') invalid(`${key} must be a string`)

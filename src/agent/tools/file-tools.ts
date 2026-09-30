@@ -44,7 +44,7 @@ export function fileTools(workspaceDirectory: string): {
     { matches: Array<{ path: string; line: number; text: string }>; truncated: boolean }
   >
   readFile: Tool<
-    { path: string; startLine?: number; lineCount?: number },
+    { path: string; startLine?: number | undefined; lineCount?: number | undefined },
     { path: string; startLine: number; totalLines: number; content: string; truncated: boolean }
   >
 } {

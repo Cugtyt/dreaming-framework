@@ -4,15 +4,15 @@ import { fileURLToPath } from 'node:url'
 import type { LanguageModel } from 'ai'
 import { MockLanguageModelV3 } from 'ai/test'
 import { codexAdapter } from '../extensions/codex/index.ts'
+import { validateTrace } from '../src/domain/validation.ts'
 import {
   createDreamer,
   type DreamResult,
   type TraceRecord,
   type TraceSession,
 } from '../src/index.ts'
-import { parseOtelTrace } from '../src/otel.ts'
 import { defaultProjectSession } from '../src/stages/project-session.ts'
-import { validateTrace } from '../src/validation.ts'
+import { parseOtelTrace } from '../src/trace/otel.ts'
 import { prepareWorkspace } from '../src/workspace.ts'
 import { enrichUserFeedback } from './dream-with-feedback.ts'
 import { createRunDirectory } from './run-directory.ts'
@@ -35,13 +35,11 @@ export function reviewCase(
   evaluatedAttempts: number,
 ) {
   const readRecords = (session: TraceSession) => {
-    const results = new Map(
-      session.records
-        .filter(
-          (record) => record.kind === 'gen_ai.tool.call.result' && record.parent_id !== undefined,
-        )
-        .map((record) => [record.parent_id!, record]),
-    )
+    const results = new Map<string, TraceRecord>()
+    for (const record of session.records) {
+      if (record.kind !== 'gen_ai.tool.call.result' || record.parent_id === undefined) continue
+      results.set(record.parent_id, record)
+    }
     return session.records
       .filter(
         (record) =>
@@ -128,26 +126,27 @@ export function createCaseModel(
   name: (typeof caseDefinitions)[number]['name'],
   trace: TraceSession,
 ): LanguageModel {
+  type MockGenerateResult = Awaited<ReturnType<MockLanguageModelV3['doGenerate']>>
   const usage = () => ({
     inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
     outputTokens: { total: 1, text: 1, reasoning: undefined },
   })
-  const toolCall = (toolName: string, input: unknown, toolCallId: string) => ({
+  const toolCall = (toolName: string, input: unknown, toolCallId: string): MockGenerateResult => ({
     content: [
       {
-        type: 'tool-call' as const,
+        type: 'tool-call',
         toolCallId,
         toolName,
         input: JSON.stringify(input),
       },
     ],
-    finishReason: { unified: 'tool-calls' as const, raw: undefined },
+    finishReason: { unified: 'tool-calls', raw: undefined },
     usage: usage(),
     warnings: [],
   })
-  const textResponse = (value: unknown) => ({
-    content: [{ type: 'text' as const, text: JSON.stringify(value) }],
-    finishReason: { unified: 'stop' as const, raw: undefined },
+  const textResponse = (value: unknown): MockGenerateResult => ({
+    content: [{ type: 'text', text: JSON.stringify(value) }],
+    finishReason: { unified: 'stop', raw: undefined },
     usage: usage(),
     warnings: [],
   })
@@ -157,13 +156,11 @@ export function createCaseModel(
     ...(record.event_index === undefined ? {} : { event_index: record.event_index }),
   })
   const readRecords = () => {
-    const results = new Map(
-      trace.records
-        .filter(
-          (record) => record.kind === 'gen_ai.tool.call.result' && record.parent_id !== undefined,
-        )
-        .map((record) => [record.parent_id!, record]),
-    )
+    const results = new Map<string, TraceRecord>()
+    for (const record of trace.records) {
+      if (record.kind !== 'gen_ai.tool.call.result' || record.parent_id === undefined) continue
+      results.set(record.parent_id, record)
+    }
     return trace.records
       .filter(
         (record) =>

@@ -10,15 +10,17 @@ const negativeRules = [
 ]
 
 function feedbackScore(raw: string): 0 | 1 | undefined {
+  const requestMarker = '## My request:'
   if (
     /^\s*(?:# Response annotations:|<hook_prompt|<recommended_plugins>|<send_user_message|# AGENTS\.md)/i.test(
       raw,
     ) &&
-    !raw.includes('## My request:')
+    !raw.includes(requestMarker)
   ) {
     return undefined
   }
-  const request = raw.includes('## My request:') ? raw.split('## My request:').at(-1)! : raw
+  const markerIndex = raw.lastIndexOf(requestMarker)
+  const request = markerIndex >= 0 ? raw.slice(markerIndex + requestMarker.length) : raw
   const text = request.replace(/^\s*>[^\n]*(?:\n|$)/gm, '').replace(/```[\s\S]*?```/g, '')
   for (const pattern of negativeRules) {
     const match = pattern.exec(text)

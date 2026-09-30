@@ -23,6 +23,34 @@ export function createModelTrace(
   }
 
   return {
+    summaryCallbacks: {
+      onLanguageModelCallStart(event: LanguageModelCallStartEvent) {
+        events.push({
+          event: 'model_call_start',
+          purpose: 'summary',
+          callId: event.callId,
+          provider: event.provider,
+          modelId: event.modelId,
+          instructions: event.instructions,
+          messages: event.messages,
+          tools: event.tools,
+        })
+      },
+      onLanguageModelCallEnd(event: LanguageModelCallEndEvent) {
+        events.push({
+          event: 'model_call_end',
+          purpose: 'summary',
+          callId: event.callId,
+          responseId: event.responseId,
+          content: event.content,
+          finishReason: event.finishReason,
+          usage: event.usage,
+        })
+      },
+    },
+    recordCompaction(summary: unknown, beforeTokens: number, afterTokens: number) {
+      events.push({ event: 'context_compaction', summary, beforeTokens, afterTokens })
+    },
     callbacks: {
       onLanguageModelCallStart(event: LanguageModelCallStartEvent) {
         events.push({
@@ -63,3 +91,5 @@ export function createModelTrace(
       save({ event: 'error', message: error instanceof Error ? error.message : String(error) }),
   }
 }
+
+export type ModelTrace = ReturnType<typeof createModelTrace>

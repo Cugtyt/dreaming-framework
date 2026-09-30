@@ -1,11 +1,9 @@
 import type { LanguageModel } from 'ai'
-import { Output, stepCountIs, ToolLoopAgent } from 'ai'
-import { z } from 'zod'
-import type { EvaluationDecision, StageImplementations, TraceRecord } from '../types.ts'
-import { invalid, object, references, text } from '../validation.ts'
-import { fileTools } from './file-tools.ts'
-import { createModelTrace } from './model-trace.ts'
-import { sourceTool } from './source-tool.ts'
+import { Output } from 'ai'
+import { DEFAULT_CONTEXT_WINDOW_TOKENS } from '../agent/context-management.ts'
+import { runAgent } from '../agent/run-agent.ts'
+import type { StageImplementations } from '../contracts.ts'
+import { evaluationDecisionSchema } from '../domain/schemas.ts'
 
 const INSTRUCTIONS = `Evaluate the candidate improvement spec against every supplied session and evaluation item.
 Use the file tools to read the candidate and every tagged text projection file. Evaluation tags carry score, target, and weight (default 1). Infer whether the proposal would move observed scores toward their targets, taking weights and already-met outcomes into account.
@@ -15,48 +13,21 @@ Return { kind: "accept" | "revise" | "reject", reason, references }. Cite record
 Accept only with trace-supported predicted gain and preserved constraints; otherwise give specific feedback for another proposal attempt.
 This is a prediction from past traces, not a measurement of an implemented change.`
 
-const referenceSchema = z.object({
-  trace_id: z.string(),
-  span_id: z.string(),
-  event_index: z.number().int().nonnegative().optional(),
-})
-const decisionSchema = z.object({
-  kind: z.enum(['accept', 'revise', 'reject']),
-  reason: z.string(),
-  references: z.array(referenceSchema),
-})
-
-export function defaultEvaluateSpec(model: LanguageModel): StageImplementations['evaluateSpec'] {
-  return async (_, { getSource, workspaceDirectory, attempt }) => {
-    const trace = createModelTrace(workspaceDirectory, attempt, 'evaluator')
-    const agent = new ToolLoopAgent({
+export function defaultEvaluateSpec(
+  model: LanguageModel,
+  contextWindowTokens = DEFAULT_CONTEXT_WINDOW_TOKENS,
+): StageImplementations['evaluateSpec'] {
+  return async (_, services) => {
+    const { attempt } = services
+    const result = await runAgent({
       model,
-      id: 'dreaming.evaluator',
+      contextWindowTokens,
+      stage: 'evaluator',
+      services,
       instructions: `${INSTRUCTIONS}\nRead attempts/${attempt}/proposal.json and projections/*.txt.`,
-      output: Output.object({ schema: decisionSchema }),
-      tools: { ...fileTools(workspaceDirectory), getSource: sourceTool(getSource) },
-      stopWhen: stepCountIs(12),
-      ...trace.callbacks,
+      output: Output.object({ schema: evaluationDecisionSchema.required({ references: true }) }),
+      traceResult: (value) => value,
     })
-    let generation: Awaited<ReturnType<typeof agent.generate>>
-    try {
-      generation = await agent.generate({ prompt: workspaceDirectory })
-    } catch (error) {
-      await trace.writeError(error)
-      throw error
-    }
-    await trace.writeResult(generation.output)
-    return generation.output
+    return result
   }
-}
-
-export function validateDecision(
-  value: unknown,
-  sources: Map<string, TraceRecord>,
-): asserts value is EvaluationDecision {
-  if (!object(value) || !['accept', 'revise', 'reject'].includes(String(value.kind))) {
-    invalid('evaluateSpec must accept, revise, or reject')
-  }
-  text(value.reason, 'evaluation reason')
-  if (value.references !== undefined) references(value.references, 'evaluation decision', sources)
 }

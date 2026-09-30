@@ -157,6 +157,40 @@ contain context the model saw; provider headers and credentials are excluded.
 Custom reasoning stages manage their own logs. The model's file listing does not
 include these `.jsonl` files.
 
+Default proposer and evaluator agents compact their working conversation when
+estimated input reaches 10,000 tokens below the configured context window:
+
+```ts
+const dreamer = createDreamer({ model, contextWindowTokens: 128_000 })
+```
+
+`contextWindowTokens` defaults to 128,000 and must be a safe integer greater than
+14,000. Supply the actual window for your model. Each agent uses its previous
+reported input usage, including cached tokens, plus estimated newly added
+content; without usage it estimates the full request from UTF-8 bytes divided
+by three. Instructions, messages, tool definitions, and output schema contribute
+to the estimate. This is an approximation, not a provider tokenizer.
+
+Compaction asks the same model for a structured summary of older progress with
+tools disabled and a 4,000-token output limit. It excludes the latest complete
+assistant/tool round, keeps that round verbatim, and inserts the summary as a
+user message after the original task. Instructions remain unchanged. Summaries
+record fully read files, in-progress reads, findings with source references,
+current spec, rejected ideas/contrary evidence, and next steps. Read coverage is
+model-reported. Later compactions incorporate the previous summary.
+
+Summary calls have `purpose: "summary"` in the existing model logs;
+`context_compaction` events include the parsed summary and before/after token
+estimates. Summary errors and contexts that cannot fit fail through the normal
+stage error path without silently truncating evidence. There must be older work
+to summarize; if only the first recent round reaches the threshold, the stage
+fails rather than consuming the 10,000-token headroom. Each stage has independent
+context, and custom stages are unchanged.
+Compaction adds model calls and cost but does not reset the existing 12-step
+limit or proposal attempts. File/search enumeration limits and the complete
+`getSource` response are unchanged, so a very large result can still prevent
+continuation. See the [context-management contract](docs/specs/context-management.md).
+
 The hello-world trace's `requirement`, `skill.load`, and `tool.result` spans carry
 item-level `harness_rsi.scope` attributes. A separate `gen_ai.evaluation.result`
 span carries the observed score and target. Those values supply the improvement
@@ -201,12 +235,23 @@ adds `event_index` for an event within that span.
 
 ## Code layout
 
-`src/index.ts` is the public entry point and `src/types.ts` defines its
-contracts. `src/otel.ts` parses OTLP input; `src/validation.ts` checks shared
-trace and stage invariants. `src/dream.ts` owns stage order, parallel session
-work, source lookup, and retry control. `src/workspace.ts` writes run files. Each
-stage file in `src/stages/` owns its default implementation and output
-validation; `file-tools.ts` and `source-tool.ts` serve the two AI SDK stages.
+`src/index.ts` exposes the public API. `src/contracts.ts` defines dreamer
+configuration and stage interfaces; `src/domain/` owns trace/spec types, shared
+schemas, invariants, and source indexing without importing the AI SDK or agents.
+`src/trace/` parses OTLP and formats projections. `src/dream.ts` composes stages,
+validates their results, and controls proposal retries; `src/workspace.ts`
+prepares the run directory and writes artifacts.
+
+`src/stages/` owns enrichment/projection behavior and the proposal/evaluation
+instructions. Both reasoning stages call `src/agent/run-agent.ts`, which owns
+agent construction, tools, context hooks, execution, and model logging.
+`src/agent/context-management.ts` handles budgets and history replacement;
+`src/agent/checkpoint.ts` defines the structured progress checkpoint.
+File/source tools live in `src/agent/tools/`. Codex conversion stays in
+`extensions/codex/` behind its separate package export.
+
+The dependency boundaries are checked in `tests/architecture.test.ts`.
+See [project boundaries](docs/specs/project-boundaries.md) for the ownership contract.
 
 `pnpm check` enforces the repository's Biome style and lint rules. `pnpm build`
 emits JavaScript and declarations to `dist/` through the package entry point.

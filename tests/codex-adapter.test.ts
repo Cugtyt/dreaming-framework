@@ -4,9 +4,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { codexAdapter } from '../extensions/codex/index.ts'
+import { validateTrace } from '../src/domain/validation.ts'
 import { createDreamer } from '../src/index.ts'
-import { parseOtelTrace } from '../src/otel.ts'
-import { validateTrace } from '../src/validation.ts'
+import { parseOtelTrace } from '../src/trace/otel.ts'
+import { requireValue } from './helpers.ts'
 
 const line = (type: string, payload: Record<string, unknown>, timestamp = '2026-09-25T10:00:00Z') =>
   JSON.stringify({ timestamp, type, payload })
@@ -58,7 +59,9 @@ test('Codex adapter maps completed messages and both tool forms with stable iden
   const parsed = validateTrace(parseOtelTrace(traces[0]))
   assert.equal(parsed.harness_version, 'codex-cli@0.155.0')
   assert.equal(parsed.records.length, 8)
-  const developer = parsed.records.find((record) => record.kind === 'gen_ai.developer.message')!
+  const developer = requireValue(
+    parsed.records.find((record) => record.kind === 'gen_ai.developer.message'),
+  )
   assert.equal(developer.attributes?.['harness_rsi.scope'], 'out')
   assert.equal(parsed.records.at(-1)?.attributes?.['harness_rsi.scope'], 'in')
   const calls = parsed.records.filter((record) => record.kind === 'gen_ai.tool.call')
@@ -135,9 +138,13 @@ test('converted Codex traces work with framework enrichment and dreaming', async
   const workspaceDirectory = await mkdtemp(join(tmpdir(), 'codex-dream-'))
   const result = await createDreamer({
     stages: {
-      enrichTrace: (trace) => ({
-        evaluations: [{ name: 'test/v1', value: 0, target: 1, time: trace.records.at(-1)!.time! }],
-      }),
+      enrichTrace: (trace) => {
+        const lastRecord = requireValue(trace.records.at(-1))
+        const time = requireValue(lastRecord.time)
+        return {
+          evaluations: [{ name: 'test/v1', value: 0, target: 1, time }],
+        }
+      },
       proposeSpec: ({ views }) => {
         assert.equal(views[0]?.harness_version, 'codex-cli@0.155.0')
         assert.equal(views[0]?.records.at(-1)?.kind, 'gen_ai.evaluation.result')

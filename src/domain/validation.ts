@@ -1,4 +1,12 @@
-import type { SourceReference, StageImplementations, TraceRecord, TraceSession } from './types.ts'
+import { sourceKey } from './sources.ts'
+import type {
+  EvaluationDecision,
+  ImprovementSpec,
+  NoProposal,
+  SourceReference,
+  TraceRecord,
+  TraceSession,
+} from './types.ts'
 
 export function invalid(message: string): never {
   throw new Error(message)
@@ -34,7 +42,7 @@ export function references(
     invalid(`${name} must contain source references`)
   }
   for (const ref of value as SourceReference[]) {
-    if (!sources.has(JSON.stringify([ref.trace_id, ref.span_id, ref.event_index ?? null])))
+    if (!sources.has(sourceKey(ref)))
       invalid(`${name} has unresolved reference ${JSON.stringify(ref)}`)
   }
 }
@@ -123,11 +131,46 @@ export function validateTrace(value: unknown): TraceSession {
   return value as unknown as TraceSession
 }
 
-export function assertStageImplementations(
-  value: Partial<StageImplementations>,
-): asserts value is StageImplementations {
-  const names = ['enrichTrace', 'projectSession', 'proposeSpec', 'evaluateSpec'] as const
-  for (const name of names) {
-    if (typeof value[name] !== 'function') invalid(`${name} must be a function`)
+export function isNoProposal(value: unknown): value is NoProposal {
+  return object(value) && value.kind === 'no_proposal'
+}
+
+export function validateNoProposal(value: NoProposal, sources: Map<string, TraceRecord>): void {
+  text(value.reason, 'no-proposal reason')
+  if (value.references !== undefined) references(value.references, 'no-proposal', sources)
+}
+
+export function validateCandidate(
+  value: unknown,
+  sources: Map<string, TraceRecord>,
+  inSources: Set<string>,
+  harnessVersion: string,
+): asserts value is ImprovementSpec {
+  if (!object(value)) invalid('proposeSpec must return a candidate or no proposal')
+  text(value.issue, 'Issue')
+  text(value.proposal, 'Proposal')
+  text(value.predict, 'Predict')
+  text(value.baseHarnessVersion, 'base harness version')
+  if (value.baseHarnessVersion !== harnessVersion)
+    invalid('candidate has a different base harness version')
+  references(value.references, 'candidate', sources)
+  if (value.references.length === 0) invalid('candidate needs source references')
+  if (
+    !(value.references as SourceReference[]).some((reference) =>
+      inSources.has(sourceKey(reference)),
+    )
+  ) {
+    invalid('candidate needs an in-scope source reference')
   }
+}
+
+export function validateDecision(
+  value: unknown,
+  sources: Map<string, TraceRecord>,
+): asserts value is EvaluationDecision {
+  if (!object(value) || !['accept', 'revise', 'reject'].includes(String(value.kind))) {
+    invalid('evaluateSpec must accept, revise, or reject')
+  }
+  text(value.reason, 'evaluation reason')
+  if (value.references !== undefined) references(value.references, 'evaluation decision', sources)
 }

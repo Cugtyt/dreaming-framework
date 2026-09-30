@@ -10,7 +10,7 @@ does not schedule work or use DSH.
 
 ## Public contract
 
-- `createDreamer({ model?, stages?, maxProposalAttempts? }).dream(otelTraces,
+- `createDreamer({ model?, stages?, maxProposalAttempts?, contextWindowTokens? }).dream(otelTraces,
   { workspaceDirectory, stages? })` accepts an array of completed OTLP JSON trace exports, one
   trace ID per array element. The host supplies an AI SDK `LanguageModel` when
   any default reasoning stage is used. If both reasoning stages are
@@ -35,12 +35,27 @@ does not schedule work or use DSH.
   default without changing the others. Each stage has a specific typed input
   and output. The reasoning stages receive run services in a separate argument;
   custom stages may use AI SDK, other models, or ordinary business logic.
+- Default agents use independent context management from `src/agent/`.
+  `contextWindowTokens` defaults to 128,000 and must be a safe integer greater
+  than 14,000. Before each normal model call, previous reported input usage plus
+  estimated added content (or a whole-request estimate when usage is absent)
+  triggers compaction at 10,000 tokens below the window. The same model generates
+  a structured summary of older messages with no tools and at most 4,000 output
+  tokens. The original task and instructions remain, followed by a user summary
+  and the latest complete assistant/tool round, which is excluded from summary
+  input. Later compactions include the previous summary. Summary failure or an
+  oversized context fails the stage without silently truncating evidence. The
+  existing 12-step limit and proposal attempts do not reset. Source/file tool
+  behavior and custom stages are unchanged. Exact behavior and limitations are
+  defined in `docs/specs/context-management.md`.
 - Each default agent call writes `attempts/<number>/proposer-model.jsonl` or
   `evaluator-model.jsonl` with its model inputs, prepared tool definitions,
   model responses, tool results, token usage, and parsed result or error. The
   files omit provider headers and credentials. They are local run artifacts,
   separate from the input OTLP traces, and are not listed by the model's file
-  tools. Custom reasoning stages own any logging they need.
+  tools. Summary model events carry `purpose: "summary"`, and
+  `context_compaction` events record the summary and before/after estimates.
+  Custom reasoning stages own any logging they need.
 - The framework parses OTLP before `enrichTrace`. That hook receives a parsed
   `TraceDraft` and returns `TraceAdditions`: an optional missing harness version,
   scope labels for unlabeled items, and independent evaluation records with
@@ -110,16 +125,23 @@ does not schedule work or use DSH.
 
 ## Code ownership
 
-- `src/index.ts` exports the public API, and `src/types.ts` owns its contracts.
-- `src/otel.ts` parses OTLP JSON. `src/validation.ts` holds shared trace and
-  stage invariants.
-- `src/stages/enrich-trace.ts`, `project-session.ts`, `propose-spec.ts`, and
-  `evaluate-spec.ts` each own that stage's default and output validation.
-  `source-tool.ts` and `model-trace.ts` are shared by the two model stages.
-- `src/dream.ts` composes stages, indexes source evidence, writes projections,
-  and controls proposal retries. It does not own stage prompts or
-  stage-specific output validation. `src/workspace.ts` owns run file writing;
-  `src/stages/file-tools.ts` owns confined read-only model file access.
+- `src/index.ts` exports the existing public API; `src/contracts.ts` owns setup,
+  stage interfaces and services. `src/domain/types.ts` owns domain types.
+- `src/domain/schemas.ts` owns shared structured-output schemas;
+  `src/domain/validation.ts` owns trace/spec/decision invariants;
+  `src/domain/sources.ts` owns native keys, indexing and cloned source lookup.
+- `src/trace/otel.ts` parses OTLP and `src/trace/projection.ts` formats projected text.
+- `src/stages/` owns enrichment/projection behavior and proposal/evaluation instructions.
+  `src/agent/run-agent.ts` owns construction and execution for both model stages,
+  including tools, tracing, context hooks and the twelve-step limit.
+- `src/agent/checkpoint.ts` defines checkpoint content; `context-management.ts`
+  owns budget estimation and history replacement; `model-trace.ts` owns logging.
+  File/source tools live in `src/agent/tools/`.
+- `src/dream.ts` composes stages, validates results against domain rules, writes
+  projections and controls retries. `src/workspace.ts` owns run preparation/writes.
+- Domain has no AI SDK/agent imports; stages do not construct SDK agents; core
+  does not depend on extensions. These boundaries have a static test. The full
+  ownership contract is in [project-boundaries.md](project-boundaries.md).
 
 ## OTLP JSON interpretation
 
@@ -187,6 +209,11 @@ measured.
   Malformed model outputs fail schema or framework output validation. Fully
   custom reasoning stages work without a model; incomplete stages without a
   model fail at setup. Invalid stage functions also fail at setup.
+- Mock-model tests force repeated context compactions, preserve original tasks
+  and complete recent tool rounds, exclude the retained round from summary
+  input, and continue both default stages to their existing structured outputs.
+  They cover usage fallback, configuration validation, failure without history
+  mutation, oversized contexts, logs, and unchanged normal-agent step limits.
 - Enrichment can fill a missing harness version or label and return new
   evaluations without altering existing evidence. A complete trace works with
   empty enrichment. The framework owns OTLP traversal and generated IDs.

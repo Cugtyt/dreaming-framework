@@ -4,8 +4,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { MockLanguageModelV3 } from 'ai/test'
+import { fileTools } from '../src/agent/tools/file-tools.ts'
 import { createDreamer } from '../src/index.ts'
-import { fileTools } from '../src/stages/file-tools.ts'
+import { requireValue } from './helpers.ts'
 
 const traceId = 'c'.repeat(32)
 const rootId = '1'.repeat(16)
@@ -107,7 +108,9 @@ function mockModel(outputs: unknown[]) {
 
 test('one default proposer explores projections and receives evaluator feedback', async () => {
   const trace = otelTrace()
-  trace.resourceSpans[0]!.scopeSpans[0]!.spans[0]!.attributes.push({
+  requireValue(
+    requireValue(requireValue(trace.resourceSpans[0]).scopeSpans[0]).spans[0],
+  ).attributes.push({
     key: 'gen_ai.message.content',
     value: { stringValue: 'Raw user request for searching' },
   } as never)
@@ -129,16 +132,18 @@ test('one default proposer explores projections and receives evaluator feedback'
   assert.equal(result.kind, 'spec')
   assert.equal(model.doGenerateCalls.length, 4)
   const requests = model.doGenerateCalls.map((call) => JSON.stringify(call.prompt))
-  assert.match(requests[0]!, /score|target/i)
-  assert.match(requests[0]!, /searchFiles/)
-  assert.match(requests[0]!, /first page/)
-  assert.match(requests[0]!, /causal link/)
-  assert.match(requests[1]!, /unrelated error/)
-  assert.doesNotMatch(requests[0]!, /Raw user request for searching|\[compacted\]/)
-  assert.match(requests[0]!, /projections/)
-  const firstUserMessage = model.doGenerateCalls[0]!.prompt.find(
-    (message) => message.role === 'user',
-  )
+  const firstRequest = requireValue(requests[0])
+  const secondRequest = requireValue(requests[1])
+  const thirdRequest = requireValue(requests[2])
+  assert.match(firstRequest, /score|target/i)
+  assert.match(firstRequest, /searchFiles/)
+  assert.match(firstRequest, /first page/)
+  assert.match(firstRequest, /causal link/)
+  assert.match(secondRequest, /unrelated error/)
+  assert.doesNotMatch(firstRequest, /Raw user request for searching|\[compacted\]/)
+  assert.match(firstRequest, /projections/)
+  const firstPrompt = requireValue(model.doGenerateCalls[0]).prompt
+  const firstUserMessage = firstPrompt.find((message) => message.role === 'user')
   assert.equal(firstUserMessage?.content[0]?.type, 'text')
   if (firstUserMessage?.content[0]?.type === 'text') {
     assert.equal(firstUserMessage.content[0].text, directory)
@@ -158,7 +163,7 @@ test('one default proposer explores projections and receives evaluator feedback'
     readFileSync(join(directory, 'attempts', '1', 'feedback.json'), 'utf8'),
     /Check the out-of-scope result/,
   )
-  assert.doesNotMatch(requests[2]!, /Check the out-of-scope result/)
+  assert.doesNotMatch(thirdRequest, /Check the out-of-scope result/)
   for (const stage of ['proposer', 'evaluator'] as const) {
     const events = modelTrace(directory, 1, stage)
     assert.equal(events[0]?.event, 'model_call_start')
@@ -170,9 +175,9 @@ test('one default proposer explores projections and receives evaluator feedback'
   }
   assert.equal(modelTrace(directory, 2, 'proposer').at(-1)?.event, 'result')
   assert.equal(modelTrace(directory, 2, 'evaluator').at(-1)?.event, 'result')
-  const listed = (await fileTools(directory).listFiles.execute!({}, {} as never)) as {
-    files: string[]
-  }
+  const listFiles = requireValue(fileTools(directory).listFiles.execute)
+  const listed = await listFiles({}, { toolCallId: 'test', messages: [], context: undefined })
+  assert.ok('files' in listed)
   assert.equal(
     listed.files.some((path) => path.endsWith('.jsonl')),
     false,
@@ -208,7 +213,10 @@ test('default proposer retries an invalid citation without running the evaluator
   )
   assert.equal(existsSync(join(directory, 'attempts', '1', 'evaluation.json')), false)
   assert.equal(existsSync(join(directory, 'attempts', '1', 'evaluator-model.jsonl')), false)
-  assert.match(JSON.stringify(model.doGenerateCalls[1]!.prompt), /attempts\/1\/feedback.json/)
+  assert.match(
+    JSON.stringify(requireValue(model.doGenerateCalls[1]).prompt),
+    /attempts\/1\/feedback.json/,
+  )
   assert.equal(modelTrace(directory, 2, 'evaluator').at(-1)?.event, 'result')
 })
 
@@ -295,7 +303,10 @@ test('default proposer can inspect compacted source through getSource', async ()
     workspaceDirectory: workspaceDirectory(),
   })
   assert.equal(result.kind, 'no_proposal')
-  assert.match(JSON.stringify(model.doGenerateCalls[1]!.prompt), /Review spec already available/)
+  assert.match(
+    JSON.stringify(requireValue(model.doGenerateCalls[1]).prompt),
+    /Review spec already available/,
+  )
 })
 
 test('default proposer reads projection files through the model file tool', async () => {
@@ -340,7 +351,7 @@ test('default proposer reads projection files through the model file tool', asyn
     workspaceDirectory: directory,
   })
   assert.equal(result.kind, 'no_proposal')
-  const secondPrompt = JSON.stringify(model.doGenerateCalls[1]!.prompt)
+  const secondPrompt = JSON.stringify(requireValue(model.doGenerateCalls[1]).prompt)
   assert.match(secondPrompt, /\[compacted\]/)
   assert.match(secondPrompt, /scope=/)
   const events = modelTrace(directory, 1, 'proposer')
@@ -407,5 +418,108 @@ test('default evaluator reads the candidate written by a custom proposer', async
     { workspaceDirectory: workspaceDirectory() },
   )
   assert.equal(result.kind, 'spec')
-  assert.match(JSON.stringify(model.doGenerateCalls[1]!.prompt), /Repeated search/)
+  assert.match(JSON.stringify(requireValue(model.doGenerateCalls[1]).prompt), /Repeated search/)
 })
+
+for (const stage of ['proposer', 'evaluator'] as const) {
+  test(`default ${stage} continues after compaction with its original output schema`, async () => {
+    const directory = workspaceDirectory()
+    const candidate = {
+      issue: 'Repeated search',
+      proposal: 'Revise the review skill',
+      predict: 'Search efficiency improves',
+      baseHarnessVersion: 'review-harness@1',
+      references: [skillRef, scoreRef],
+    }
+    let normalCalls = 0
+    let summaries = 0
+    const model = new MockLanguageModelV3({
+      doGenerate: async (call) => {
+        const isSummary =
+          call.responseFormat?.type === 'json' && call.responseFormat.name === 'ContextSummary'
+        if (isSummary) summaries++
+        else normalCalls++
+        const useTool = !isSummary && normalCalls <= 2
+        return {
+          content: useTool
+            ? [
+                {
+                  type: 'tool-call',
+                  toolCallId: `read-${normalCalls}`,
+                  toolName: 'readFile',
+                  input: JSON.stringify({ path: `projections/${traceId}.txt` }),
+                },
+              ]
+            : [
+                {
+                  type: 'text',
+                  text: JSON.stringify(
+                    isSummary
+                      ? {
+                          fullyReadFiles: [],
+                          inProgress: [
+                            {
+                              path: `projections/${traceId}.txt`,
+                              readThroughLine: 1,
+                              remainingWork: 'Verify sources',
+                            },
+                          ],
+                          findings: [
+                            { conclusion: 'Preserve successful searches', references: [skillRef] },
+                          ],
+                          currentSpec: stage === 'evaluator' ? candidate : null,
+                          rejectedIdeas: ['An unrelated error does not establish a cause'],
+                          nextSteps: ['Complete verification'],
+                        }
+                      : stage === 'proposer'
+                        ? { result: candidate }
+                        : { kind: 'accept', reason: 'Supported', references: [skillRef] },
+                  ),
+                },
+              ],
+          finishReason: { unified: useTool ? 'tool-calls' : 'stop', raw: undefined },
+          usage: {
+            inputTokens: {
+              total: normalCalls === 1 ? 1 : 20_000,
+              noCache: normalCalls === 1 ? 1 : 20_000,
+              cacheRead: undefined,
+              cacheWrite: undefined,
+            },
+            outputTokens: { total: 1, text: 1, reasoning: undefined },
+          },
+          warnings: [],
+        }
+      },
+    })
+    const result = await createDreamer({
+      model,
+      contextWindowTokens: 30_000,
+      stages:
+        stage === 'proposer'
+          ? { evaluateSpec: () => ({ kind: 'accept', reason: 'Supported' }) }
+          : { proposeSpec: () => candidate },
+    }).dream([otelTrace()], { workspaceDirectory: directory })
+    assert.equal(result.kind, 'spec')
+    assert.equal(summaries, 1)
+    assert.equal(normalCalls, 3)
+    const finalPrompt = JSON.stringify(model.doGenerateCalls.at(-1)?.prompt)
+    assert.match(finalPrompt, /Prior progress/)
+    assert.match(finalPrompt, /read-2/)
+    assert.doesNotMatch(finalPrompt, /read-1/)
+    assert.match(
+      finalPrompt,
+      stage === 'proposer' ? /Explore all projected sessions/ : /Evaluate the candidate/,
+    )
+    const events = modelTrace(directory, 1, stage)
+    assert.equal(events.filter((event) => event.event === 'context_compaction').length, 1)
+    assert.equal(events.at(-1)?.event, 'result')
+    const summaryRequest = requireValue(
+      model.doGenerateCalls.find(
+        (call) =>
+          call.responseFormat?.type === 'json' && call.responseFormat.name === 'ContextSummary',
+      ),
+    )
+    assert.match(JSON.stringify(summaryRequest.prompt), /read-1/)
+    assert.doesNotMatch(JSON.stringify(summaryRequest.prompt), /read-2/)
+  })
+}

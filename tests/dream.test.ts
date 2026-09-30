@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { createDreamer, type DreamerSetup, type StageOverrides } from '../src/index.ts'
+import { requireValue } from './helpers.ts'
 
 const firstId = 'a'.repeat(32)
 const secondId = 'b'.repeat(32)
@@ -22,7 +23,7 @@ function createWithStages(
     dream: (inputs: readonly unknown[], overrides?: StageOverrides) =>
       dreamer.dream(inputs, {
         workspaceDirectory: mkdtempSync(join(tmpdir(), 'dream-test-')),
-        stages: overrides,
+        ...(overrides === undefined ? {} : { stages: overrides }),
       }),
   }
 }
@@ -123,28 +124,26 @@ const candidate = {
 
 test('accepts a cited spec from OTel input and keeps full source after projection', async () => {
   const trace = otelTrace()
-  trace.resourceSpans[0]!.scopeSpans[0]!.spans[0]!.attributes.push({
+  const firstResource = requireValue(trace.resourceSpans[0])
+  const firstScope = requireValue(firstResource.scopeSpans[0])
+  requireValue(firstScope.spans[0]).attributes.push({
     key: 'gen_ai.message.content',
     value: { stringValue: 'Original user request' },
   } as never)
-  trace.resourceSpans[0]!.scopeSpans[0]!.spans[1]!.attributes.push({
+  requireValue(firstScope.spans[1]).attributes.push({
     key: 'gen_ai.tool.call.arguments',
     value: { stringValue: 'Original tool arguments' },
   } as never)
   const original = structuredClone(trace)
   const dreamer = createWithStages({
     proposeSpec: ({ views }, { getSource }) => {
-      const view = views[0]!
-      assert.equal(view.records.find((item) => item.span_id === resultId)?.content, '[compacted]')
-      assert.equal(view.records.find((item) => item.span_id === resultId)?.span_id, resultId)
-      assert.equal(
-        view.records.find((item) => item.span_id === skillId)?.attributes?.['harness_rsi.scope'],
-        'in',
-      )
-      assert.equal(
-        'harness_rsi.scope' in view.records.find((item) => item.span_id === skillId)!,
-        false,
-      )
+      const view = requireValue(views[0])
+      const resultRecord = requireValue(view.records.find((item) => item.span_id === resultId))
+      const skillRecord = requireValue(view.records.find((item) => item.span_id === skillId))
+      assert.equal(resultRecord.content, '[compacted]')
+      assert.equal(resultRecord.span_id, resultId)
+      assert.equal(skillRecord.attributes?.['harness_rsi.scope'], 'in')
+      assert.equal('harness_rsi.scope' in skillRecord, false)
       assert.equal(
         view.records.find((item) => item.span_id === rootId)?.attributes?.[
           'gen_ai.message.content'
@@ -171,7 +170,7 @@ test('accepts a cited spec from OTel input and keeps full source after projectio
       assert.deepEqual(evaluations[0]?.reference, scoreRef)
       assert.equal(evaluations[0]?.record.attributes?.['harness_rsi.evaluation.weight'], 1)
       assert.equal(getSource(resultRef)?.content, 'The spec was already available')
-      const copy = getSource(resultRef)!
+      const copy = requireValue(getSource(resultRef))
       copy.content = 'changed locally'
       assert.equal(getSource(resultRef)?.content, 'The spec was already available')
       return { kind: 'accept', reason: 'The score and evidence support the change' }
@@ -185,10 +184,14 @@ test('accepts a cited spec from OTel input and keeps full source after projectio
 
 test('event index distinguishes events inside the same span', async () => {
   const trace = otelTrace()
-  const events = trace.resourceSpans[0]!.scopeSpans[0]!.spans[0]!.events!
-  const second = structuredClone(events[0]!)
+  const firstResource = requireValue(trace.resourceSpans[0])
+  const firstScope = requireValue(firstResource.scopeSpans[0])
+  const rootSpan = requireValue(firstScope.spans[0])
+  const events = requireValue(rootSpan.events)
+  const second = structuredClone(requireValue(events[0]))
   second.timeUnixNano = '210'
-  second.attributes[0]!.value.stringValue = 'task_correctness/v1'
+  const evaluationName = requireValue(second.attributes[0])
+  evaluationName.value.stringValue = 'task_correctness/v1'
   events.push(second)
   const secondRef = { trace_id: firstId, span_id: rootId, event_index: 1 }
   const result = await createWithStages({
@@ -249,7 +252,9 @@ test('rejects traces from different harness versions in one call', async () => {
 
 test('a one-call enrichment fills a missing label and leaves later calls unchanged', async () => {
   const incomplete = otelTrace()
-  const attributes = incomplete.resourceSpans[0]!.scopeSpans[0]!.spans[2]!.attributes
+  const attributes = requireValue(
+    requireValue(requireValue(incomplete.resourceSpans[0]).scopeSpans[0]).spans[2],
+  ).attributes
   attributes.splice(0, 1)
   const dreamer = createWithStages({
     proposeSpec: () => ({ kind: 'no_proposal', reason: 'No candidate' }),
@@ -271,7 +276,7 @@ test('enrichment cannot edit parsed source evidence', async () => {
   await assert.rejects(
     dreamer.dream([otelTrace()], {
       enrichTrace: (trace) => {
-        trace.records[1]!.kind = 'changed'
+        requireValue(trace.records[1]).kind = 'changed'
         return {}
       },
     }),
@@ -281,7 +286,7 @@ test('enrichment cannot edit parsed source evidence', async () => {
 
 test('enrichment can supply the harness version for one call', async () => {
   const incomplete = otelTrace()
-  incomplete.resourceSpans[0]!.resource.attributes.length = 0
+  requireValue(incomplete.resourceSpans[0]).resource.attributes.length = 0
   const dreamer = createWithStages({
     proposeSpec: ({ views }) => {
       assert.equal(views[0]?.harness_version, 'review-harness@1')
@@ -299,20 +304,24 @@ test('enrichment can supply the harness version for one call', async () => {
 
 test('enrichment inserts a standalone evaluation item for dreaming', async () => {
   const trace = otelTrace()
-  trace.resourceSpans[0]!.scopeSpans[0]!.spans[0]!.events!.length = 0
+  requireValue(
+    requireValue(requireValue(requireValue(trace.resourceSpans[0]).scopeSpans[0]).spans[0]).events,
+  ).length = 0
   let evaluationRef: { trace_id: string; span_id: string } | undefined
   const dreamer = createWithStages({
     proposeSpec: ({ views }) => {
       const evaluation = views[0]?.records.at(-1)
       assert.equal(evaluation?.kind, 'gen_ai.evaluation.result')
-      assert.match(evaluation!.span_id, /^[0-9a-f]{16}$/)
-      evaluationRef = { trace_id: firstId, span_id: evaluation!.span_id }
+      const evaluationRecord = requireValue(evaluation)
+      assert.match(evaluationRecord.span_id, /^[0-9a-f]{16}$/)
+      evaluationRef = { trace_id: firstId, span_id: evaluationRecord.span_id }
       return { ...candidate, references: [skillRef, evaluationRef] }
     },
     evaluateSpec: ({ evaluations }, { getSource }) => {
       assert.deepEqual(evaluations[0]?.reference, evaluationRef)
       assert.equal(evaluations[0]?.record.attributes?.['harness_rsi.evaluation.weight'], 1)
-      assert.equal(getSource(evaluationRef!)?.attributes?.['harness_rsi.evaluation.target'], 1)
+      const evaluationReference = requireValue(evaluationRef)
+      assert.equal(getSource(evaluationReference)?.attributes?.['harness_rsi.evaluation.target'], 1)
       return { kind: 'accept', reason: 'The evaluation supports the change' }
     },
   })
@@ -353,7 +362,10 @@ test('rejection feedback starts a fresh proposal pass but does not reproject', a
 
 test('stops when there is no target, no proposal, or the attempt limit is reached', async () => {
   const noScore = otelTrace()
-  noScore.resourceSpans[0]!.scopeSpans[0]!.spans[0]!.events!.length = 0
+  requireValue(
+    requireValue(requireValue(requireValue(noScore.resourceSpans[0]).scopeSpans[0]).spans[0])
+      .events,
+  ).length = 0
   const stages = {
     proposeSpec: () => candidate,
     evaluateSpec: () => ({ kind: 'reject' as const, reason: 'Not supported yet' }),
@@ -387,7 +399,9 @@ test('rejects incomplete labels, invalid citations, and changed projections', as
     evaluateSpec: () => ({ kind: 'accept' as const, reason: 'Supported' }),
   }
   const missingScope = otelTrace()
-  missingScope.resourceSpans[0]!.scopeSpans[0]!.spans[2]!.attributes.splice(0, 1)
+  requireValue(
+    requireValue(requireValue(missingScope.resourceSpans[0]).scopeSpans[0]).spans[2],
+  ).attributes.splice(0, 1)
   await assert.rejects(createWithStages(stages).dream([missingScope]), /missing scope/)
   await assert.rejects(
     createWithStages({
@@ -417,7 +431,7 @@ test('rejects incomplete labels, invalid citations, and changed projections', as
     createWithStages(stages).dream([otelTrace()], {
       projectSession: (trace) => {
         const view = structuredClone(trace)
-        view.records[0]!.span_id = 'changed'
+        requireValue(view.records[0]).span_id = 'changed'
         return view
       },
     }),
@@ -427,7 +441,9 @@ test('rejects incomplete labels, invalid citations, and changed projections', as
     createWithStages(stages).dream([otelTrace()], {
       projectSession: (trace) => {
         const view = structuredClone(trace)
-        view.records.at(-1)!.attributes!['gen_ai.evaluation.score.value'] = 1
+        const lastRecord = requireValue(view.records.at(-1))
+        const attributes = requireValue(lastRecord.attributes)
+        attributes['gen_ai.evaluation.score.value'] = 1
         return view
       },
     }),

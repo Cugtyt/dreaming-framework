@@ -1,22 +1,24 @@
-export { createDreamer } from './dream.ts'
 export type {
   DreamerSetup,
   DreamOptions,
+  ProposalInput,
+  ReasoningServices,
+  SpecEvaluationInput,
+  StageImplementations,
+  StageOverrides,
+} from './contracts.ts'
+export type {
   DreamResult,
   EvaluationDecision,
   ImprovementSpec,
   NoProposal,
-  ProposalInput,
-  ReasoningServices,
   Scope,
   SessionView,
   SourceLookup,
   SourceReference,
-  SpecEvaluationInput,
-  StageImplementations,
-  StageOverrides,
   TraceAdditions,
   TraceDraft,
   TraceRecord,
   TraceSession,
-} from './types.ts'
+} from './domain/types.ts'
+export { createDreamer } from './dream.ts'

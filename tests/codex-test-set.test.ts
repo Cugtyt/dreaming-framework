@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { MockLanguageModelV3 } from 'ai/test'
 import { caseDefinitions, reviewCase, runCodexTestSet } from '../examples/codex-test-set.ts'
+import { requireValue } from './helpers.ts'
 
 const temporaryOutput = () => mkdtempSync(join(tmpdir(), 'codex-test-set-'))
 
@@ -44,19 +45,19 @@ test('offline Codex test set runs all fixtures and captures stage artifacts', as
     existsSync(join(outputDirectory, 'ambiguous-feedback', 'attempts', '1', 'evaluation.json')),
     false,
   )
-  assert.match(result.cases[0]!.review.manualChecks.evaluator, /executed/)
-  assert.match(result.cases[1]!.review.manualChecks.evaluator, /skipped/)
-  assert.match(result.cases[2]!.review.manualChecks.evaluator, /skipped/)
-  assert.equal(result.cases[0]!.review.observations.repeatedUnchangedReadEvidence.detected, true)
+  const repeatedCase = requireValue(result.cases[0])
+  const efficientCase = requireValue(result.cases[1])
+  const ambiguousCase = requireValue(result.cases[2])
+  assert.match(repeatedCase.review.manualChecks.evaluator, /executed/)
+  assert.match(efficientCase.review.manualChecks.evaluator, /skipped/)
+  assert.match(ambiguousCase.review.manualChecks.evaluator, /skipped/)
+  assert.equal(repeatedCase.review.observations.repeatedUnchangedReadEvidence.detected, true)
   assert.match(
-    result.cases[0]!.review.observations.repeatedUnchangedReadEvidence.interpretation,
+    repeatedCase.review.observations.repeatedUnchangedReadEvidence.interpretation,
     /synthetic fixture/,
   )
-  const projectionPath = join(
-    repeated,
-    'projections',
-    readdirSync(join(repeated, 'projections'))[0]!,
-  )
+  const projectionEntries = readdirSync(join(repeated, 'projections'))
+  const projectionPath = join(repeated, 'projections', requireValue(projectionEntries[0]))
   const projection = readFileSync(projectionPath, 'utf8')
   assert.match(projection, /\[compacted\]/)
   assert.doesNotMatch(projection, /Synthetic guide: preserve the cited steps\./)
@@ -102,8 +103,9 @@ test('offline Codex test set runs all fixtures and captures stage artifacts', as
   ) as Array<{
     records: Array<{ content?: unknown }>
   }>
+  const enrichedTrace = requireValue(enriched[0])
   assert.equal(
-    enriched[0]!.records.some(
+    enrichedTrace.records.some(
       (record) => record.content === 'Synthetic guide: preserve the cited steps.',
     ),
     true,
@@ -118,7 +120,7 @@ test('caller-supplied model uses default stages without expected judgments in it
   const model = new MockLanguageModelV3({
     doGenerate: async (options) => {
       const prompt = JSON.stringify(options.prompt)
-      const workspace = join(outputDirectory, caseNames[modelCalls++]!)
+      const workspace = join(outputDirectory, requireValue(caseNames[modelCalls++]))
       snapshotsUnavailableDuringDream.push(
         !existsSync(join(workspace, 'adapter-output.json')) &&
           !existsSync(join(workspace, 'enriched-trace.json')) &&

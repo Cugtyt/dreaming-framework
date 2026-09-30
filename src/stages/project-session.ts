@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from 'node:util'
-import type { SessionView, TraceSession } from '../types.ts'
-import { invalid, object } from '../validation.ts'
+import type { SessionView, TraceSession } from '../domain/types.ts'
+import { invalid, object } from '../domain/validation.ts'
 
 const compactableAttributes = ['gen_ai.message.content', 'gen_ai.tool.call.arguments']
 

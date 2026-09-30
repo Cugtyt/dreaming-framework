@@ -3,6 +3,7 @@
   "files": {
     "includes": [
       "src/**/*.ts",
+      "extensions/**/*.ts",
       "tests/**/*.ts",
       "examples/**/*.ts",
       "package.json",
@@ -17,8 +18,12 @@
   },
   "linter": {
     "rules": {
+      "preset": "recommended",
+      "suspicious": {
+        "noExplicitAny": "error"
+      },
       "style": {
-        "noNonNullAssertion": "off"
+        "noNonNullAssertion": "error"
       }
     }
   },

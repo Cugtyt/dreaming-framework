@@ -1,12 +1,10 @@
 import { createHash } from 'node:crypto'
-import type { StageImplementations, TraceDraft, TraceRecord } from '../types.ts'
-import { invalid, object, text } from '../validation.ts'
+import type { StageImplementations } from '../contracts.ts'
+import { sourceKey } from '../domain/sources.ts'
+import type { TraceDraft, TraceRecord } from '../domain/types.ts'
+import { invalid, object, text } from '../domain/validation.ts'
 
 export const defaultEnrichTrace: StageImplementations['enrichTrace'] = () => ({})
-
-function sourceKey(spanId: string, eventIndex?: number): string {
-  return JSON.stringify([spanId, eventIndex ?? null])
-}
 
 function score(value: unknown, name: string): asserts value is number {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1) {
@@ -30,7 +28,14 @@ export function applyTraceAdditions(draft: TraceDraft, additions: unknown): Trac
   if (additions.scopes !== undefined) {
     if (!Array.isArray(additions.scopes)) invalid('scope additions must be an array')
     const records = new Map(
-      enriched.records.map((record) => [sourceKey(record.span_id, record.event_index), record]),
+      enriched.records.map((record) => [
+        sourceKey({
+          trace_id: enriched.trace_id,
+          span_id: record.span_id,
+          event_index: record.event_index,
+        }),
+        record,
+      ]),
     )
     for (const entry of additions.scopes) {
       if (!object(entry) || !object(entry.reference)) invalid('scope addition needs a reference')
@@ -44,7 +49,11 @@ export function applyTraceAdditions(draft: TraceDraft, additions: unknown): Trac
         invalid('scope addition has an invalid source reference')
       }
       const record = records.get(
-        sourceKey(reference.span_id, reference.event_index as number | undefined),
+        sourceKey({
+          trace_id: enriched.trace_id,
+          span_id: reference.span_id,
+          event_index: reference.event_index as number | undefined,
+        }),
       )
       if (!record) invalid('scope addition has an unresolved source reference')
       if (record.kind === 'gen_ai.evaluation.result') invalid('evaluation cannot have scope')
