@@ -30,8 +30,27 @@ changes belong to this work. Other worktrees are outside scope.
 - `workspace.ts` owns confined workspace preparation and writes only.
 - `extensions/` stays outside core and converts supported harness sessions into OTLP.
 
-Domain modules cannot import AI SDK or agents. Stages cannot construct ToolLoopAgent.
-Core cannot import extensions. Shared abstractions have current consumers: source
+Current relative-import rules, enforced by `tests/architecture.test.ts`:
+
+- Domain may import only domain modules; it cannot import `ai` or `ai/` subpaths.
+- Trace may import trace, domain and `contracts.ts`.
+- Agent may import agent, domain, `contracts.ts` and `workspace.ts`.
+- Stages may import stages, domain, `contracts.ts`, `agent/run-agent.ts` and
+  `agent/context-management.ts` (the runner and context constants entry points).
+- Core cannot import extensions. The root orchestrator composes the layers.
+
+Stages cannot import/re-export `ToolLoopAgent`, including aliases. Broad AI SDK
+namespace/default imports, wildcard/namespace exports, whole-module dynamic imports
+and whole-module import types are rejected in stages. Named SDK output helpers and
+model types remain permitted. Checks inspect static imports, re-exports, literal
+dynamic imports and import types; computed specifiers are outside the static check.
+The stage-to-agent rule checks modules rather than individual exported symbols.
+
+See [architecture](../architecture.md) for current file/function ownership and
+[architecture/docs contract](architecture-docs.md) for this follow-up scope.
+The original refactor scope below remains historical.
+
+Shared abstractions have current consumers: source
 indexing in orchestration/validation; shared schemas in stages/tools/checkpoints;
 agent execution in proposal/evaluation; checked fixture access in existing tests.
 
